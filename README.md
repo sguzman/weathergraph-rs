@@ -112,7 +112,10 @@ Inspect an exported checkpoint before trying parity or forecast:
 
 ```bash
 cargo run -p weathergraph-cli -- inspect-weights \
-  --weights /path/to/weights.safetensors
+  --weights /path/to/weights.safetensors \
+  --input-channels 78 \
+  --output-channels 78 \
+  --hidden-dim 256
 ```
 
 Validate a forecast request and runner wiring:

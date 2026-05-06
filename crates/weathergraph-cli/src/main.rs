@@ -36,6 +36,14 @@ enum Commands {
     InspectWeights {
         #[arg(long)]
         weights: PathBuf,
+        #[arg(long, default_value_t = 78)]
+        input_channels: usize,
+        #[arg(long, default_value_t = 78)]
+        output_channels: usize,
+        #[arg(long, default_value_t = 256)]
+        hidden_dim: usize,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        use_layer_norm: bool,
     },
     Forecast {
         #[arg(long)]
@@ -75,7 +83,19 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::InspectArtifacts { data_dir } => inspect_artifacts(&data_dir)?,
         Commands::InspectGeometry { data_dir: _ } => inspect_geometry()?,
-        Commands::InspectWeights { weights } => inspect_weights(&weights)?,
+        Commands::InspectWeights {
+            weights,
+            input_channels,
+            output_channels,
+            hidden_dim,
+            use_layer_norm,
+        } => inspect_weights(
+            &weights,
+            input_channels,
+            output_channels,
+            hidden_dim,
+            use_layer_norm,
+        )?,
         Commands::Forecast {
             data_dir,
             weights,
@@ -137,14 +157,27 @@ fn inspect_geometry() -> Result<()> {
     Ok(())
 }
 
-fn inspect_weights(weights: &PathBuf) -> Result<()> {
+fn inspect_weights(
+    weights: &PathBuf,
+    input_channels: usize,
+    output_channels: usize,
+    hidden_dim: usize,
+    use_layer_norm: bool,
+) -> Result<()> {
     info!(path = %weights.display(), "inspecting weights");
-    let report = KeislerGnn::inspect_safetensors(weights, &Config::from_data_dir(".").model)?;
+    let mut config = Config::from_data_dir(".").model;
+    config.input_channels = input_channels;
+    config.output_channels = output_channels;
+    config.hidden_dim = hidden_dim;
+    config.use_layer_norm = use_layer_norm;
+    let report = KeislerGnn::inspect_safetensors(weights, &config)?;
     println!("Weights: {}", weights.display());
     println!("Available keys: {}", report.available_keys.len());
     println!("Required coverage: {}", report.required_coverage());
     println!("Matched required: {}", report.matched_required.len());
     println!("Matched optional: {}", report.matched_optional.len());
+    println!("Shape mismatches: {}", report.shape_mismatches.len());
+    println!("Dtype mismatches: {}", report.dtype_mismatches.len());
 
     if !report.missing_required.is_empty() {
         println!("Missing required:");
@@ -156,6 +189,30 @@ fn inspect_weights(weights: &PathBuf) -> Result<()> {
         println!("Missing optional:");
         for key in &report.missing_optional {
             println!("  - {key}");
+        }
+    }
+    if !report.shape_mismatches.is_empty() {
+        println!("Shape mismatches:");
+        for mismatch in &report.shape_mismatches {
+            println!(
+                "  - {} <- {} expected {:?} got {:?}",
+                mismatch.canonical_key,
+                mismatch.matched_key,
+                mismatch.expected_shape,
+                mismatch.actual_shape
+            );
+        }
+    }
+    if !report.dtype_mismatches.is_empty() {
+        println!("Dtype mismatches:");
+        for mismatch in &report.dtype_mismatches {
+            println!(
+                "  - {} <- {} expected {} got {}",
+                mismatch.canonical_key,
+                mismatch.matched_key,
+                mismatch.expected_dtype,
+                mismatch.actual_dtype
+            );
         }
     }
     if !report.unused_keys.is_empty() {

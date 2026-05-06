@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use candle_core::{Device, Tensor};
-use safetensors::SafeTensors;
+use safetensors::{Dtype, SafeTensors};
 
 use crate::config::ModelConfig;
 use crate::error::{Result, WeatherGraphError};
@@ -156,7 +156,25 @@ pub struct WeightInspectionReport {
     pub matched_optional: Vec<WeightMatch>,
     pub missing_required: Vec<String>,
     pub missing_optional: Vec<String>,
+    pub dtype_mismatches: Vec<WeightDtypeMismatch>,
+    pub shape_mismatches: Vec<WeightShapeMismatch>,
     pub unused_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightDtypeMismatch {
+    pub canonical_key: String,
+    pub matched_key: String,
+    pub expected_dtype: String,
+    pub actual_dtype: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightShapeMismatch {
+    pub canonical_key: String,
+    pub matched_key: String,
+    pub expected_shape: Vec<usize>,
+    pub actual_shape: Vec<usize>,
 }
 
 impl WeightInspectionReport {
@@ -216,6 +234,12 @@ impl KeislerGnn {
             .iter()
             .map(|name| {
                 let view = tensors.tensor(name)?;
+                if view.dtype() != Dtype::F32 {
+                    return Err(WeatherGraphError::UnsupportedDtype {
+                        name: (*name).to_owned(),
+                        dtype: format!("{:?}", view.dtype()),
+                    });
+                }
                 let values = view
                     .data()
                     .chunks_exact(std::mem::size_of::<f32>())
@@ -234,14 +258,21 @@ impl KeislerGnn {
     ) -> Result<WeightInspectionReport> {
         let bytes = std::fs::read(path)?;
         let tensors = SafeTensors::deserialize(&bytes)?;
-        let tensor_names = tensors.names();
-        Ok(inspect_weight_keys(
-            &tensor_names
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect::<Vec<_>>(),
-            config,
-        ))
+        let tensor_metadata = tensors
+            .names()
+            .iter()
+            .map(|name| {
+                let view = tensors.tensor(name)?;
+                Ok((
+                    (*name).to_owned(),
+                    TensorMetadata {
+                        shape: view.shape().to_vec(),
+                        dtype: format!("{:?}", view.dtype()),
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        Ok(inspect_weight_metadata(&tensor_metadata, config))
     }
 
     pub fn from_weight_map(
@@ -463,29 +494,81 @@ impl KeislerGnn {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TensorMetadata {
+    shape: Vec<usize>,
+    dtype: String,
+}
+
+#[cfg(test)]
 fn inspect_weight_keys(keys: &[String], config: &ModelConfig) -> WeightInspectionReport {
-    let mut available_keys = keys.to_vec();
+    let metadata = keys
+        .iter()
+        .map(|key| {
+            (
+                key.clone(),
+                TensorMetadata {
+                    shape: Vec::new(),
+                    dtype: "unknown".to_owned(),
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    inspect_weight_metadata(&metadata, config)
+}
+
+fn inspect_weight_metadata(
+    metadata: &HashMap<String, TensorMetadata>,
+    config: &ModelConfig,
+) -> WeightInspectionReport {
+    let mut available_keys = metadata.keys().cloned().collect::<Vec<_>>();
     available_keys.sort_unstable();
 
     let mut matched_required = Vec::new();
     let mut matched_optional = Vec::new();
     let mut missing_required = Vec::new();
     let mut missing_optional = Vec::new();
+    let mut dtype_mismatches = Vec::new();
+    let mut shape_mismatches = Vec::new();
 
     for expected in expected_weight_entries(config) {
         if let Some(matched_key) = expected
             .candidate_keys
             .iter()
-            .find(|candidate| available_keys.contains(candidate))
+            .find(|candidate| metadata.contains_key(*candidate))
         {
+            let tensor_metadata = metadata
+                .get(matched_key)
+                .expect("matched key must have metadata");
+            let canonical_key = expected.canonical_key.clone();
             let matched = WeightMatch {
-                canonical_key: expected.canonical_key,
+                canonical_key: canonical_key.clone(),
                 matched_key: matched_key.clone(),
             };
             if expected.required {
                 matched_required.push(matched);
             } else {
                 matched_optional.push(matched);
+            }
+
+            if tensor_metadata.dtype != "unknown"
+                && tensor_metadata.dtype != expected.expected_dtype
+            {
+                dtype_mismatches.push(WeightDtypeMismatch {
+                    canonical_key: canonical_key.clone(),
+                    matched_key: matched_key.clone(),
+                    expected_dtype: expected.expected_dtype.clone(),
+                    actual_dtype: tensor_metadata.dtype.clone(),
+                });
+            }
+            if !tensor_metadata.shape.is_empty() && tensor_metadata.shape != expected.expected_shape
+            {
+                shape_mismatches.push(WeightShapeMismatch {
+                    canonical_key,
+                    matched_key: matched_key.clone(),
+                    expected_shape: expected.expected_shape.clone(),
+                    actual_shape: tensor_metadata.shape.clone(),
+                });
             }
         } else if expected.required {
             missing_required.push(expected.canonical_key);
@@ -511,6 +594,8 @@ fn inspect_weight_keys(keys: &[String], config: &ModelConfig) -> WeightInspectio
         matched_optional,
         missing_required,
         missing_optional,
+        dtype_mismatches,
+        shape_mismatches,
         unused_keys,
     }
 }
@@ -519,13 +604,25 @@ fn inspect_weight_keys(keys: &[String], config: &ModelConfig) -> WeightInspectio
 struct ExpectedWeightEntry {
     canonical_key: String,
     candidate_keys: Vec<String>,
+    expected_dtype: String,
+    expected_shape: Vec<usize>,
     required: bool,
 }
 
 fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     let mut entries = Vec::new();
-    entries.extend(expected_linear_entries("input_projection", false));
-    entries.extend(expected_linear_entries("output_projection", false));
+    entries.extend(expected_linear_entries(
+        "input_projection",
+        config.input_channels,
+        config.hidden_dim,
+        false,
+    ));
+    entries.extend(expected_linear_entries(
+        "output_projection",
+        config.hidden_dim,
+        config.output_channels,
+        false,
+    ));
 
     for prefix in [
         "encoder_edge_mlp",
@@ -536,6 +633,7 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     ] {
         entries.extend(expected_mlp_entries(
             prefix,
+            config.hidden_dim,
             config.use_layer_norm,
             true,
             &[prefix],
@@ -543,12 +641,14 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     }
     entries.extend(expected_mlp_entries(
         "decoder_node_mlp",
+        config.hidden_dim,
         false,
         true,
         &["decoder_node_mlp"],
     ));
     entries.extend(expected_mlp_entries(
         "processor_edge_init_mlp",
+        config.hidden_dim,
         true,
         false,
         &[
@@ -560,16 +660,25 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     entries
 }
 
-fn expected_linear_entries(prefix: &str, required: bool) -> Vec<ExpectedWeightEntry> {
+fn expected_linear_entries(
+    prefix: &str,
+    input_dim: usize,
+    output_dim: usize,
+    required: bool,
+) -> Vec<ExpectedWeightEntry> {
     vec![
         ExpectedWeightEntry {
             canonical_key: format!("{prefix}.weight"),
             candidate_keys: vec![format!("{prefix}.weight"), format!("{prefix}.w")],
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![output_dim, input_dim],
             required,
         },
         ExpectedWeightEntry {
             canonical_key: format!("{prefix}.bias"),
             candidate_keys: vec![format!("{prefix}.bias"), format!("{prefix}.b")],
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![output_dim],
             required: false,
         },
     ]
@@ -577,6 +686,7 @@ fn expected_linear_entries(prefix: &str, required: bool) -> Vec<ExpectedWeightEn
 
 fn expected_mlp_entries(
     canonical_prefix: &str,
+    hidden_dim: usize,
     with_layer_norm: bool,
     required: bool,
     prefixes: &[&str],
@@ -585,21 +695,29 @@ fn expected_mlp_entries(
         ExpectedWeightEntry {
             canonical_key: format!("{canonical_prefix}.layers.0.weight"),
             candidate_keys: candidate_param_keys(prefixes, "layers.0", "weight"),
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![hidden_dim, hidden_dim],
             required,
         },
         ExpectedWeightEntry {
             canonical_key: format!("{canonical_prefix}.layers.0.bias"),
             candidate_keys: candidate_param_keys(prefixes, "layers.0", "bias"),
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![hidden_dim],
             required: false,
         },
         ExpectedWeightEntry {
             canonical_key: format!("{canonical_prefix}.layers.1.weight"),
             candidate_keys: candidate_param_keys(prefixes, "layers.1", "weight"),
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![hidden_dim, hidden_dim],
             required,
         },
         ExpectedWeightEntry {
             canonical_key: format!("{canonical_prefix}.layers.1.bias"),
             candidate_keys: candidate_param_keys(prefixes, "layers.1", "bias"),
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![hidden_dim],
             required: false,
         },
     ];
@@ -608,11 +726,15 @@ fn expected_mlp_entries(
         entries.push(ExpectedWeightEntry {
             canonical_key: format!("{canonical_prefix}.layer_norm.weight"),
             candidate_keys: candidate_layer_norm_keys(prefixes, "weight"),
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![hidden_dim],
             required,
         });
         entries.push(ExpectedWeightEntry {
             canonical_key: format!("{canonical_prefix}.layer_norm.bias"),
             candidate_keys: candidate_layer_norm_keys(prefixes, "bias"),
+            expected_dtype: "F32".to_owned(),
+            expected_shape: vec![hidden_dim],
             required,
         });
     }
@@ -843,17 +965,33 @@ fn load_mlp_with_aliases(
     }
 
     let layer_norm = if with_layer_norm {
+        let weight = load_tensor_any(
+            tensors,
+            &candidate_layer_norm_keys(prefixes, "weight"),
+            device,
+        )?;
+        let bias = load_tensor_any(
+            tensors,
+            &candidate_layer_norm_keys(prefixes, "bias"),
+            device,
+        )?;
+        if weight.dims1()? != hidden_dim {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: format!("{}.layer_norm.weight", prefixes[0]),
+                expected: format!("[{hidden_dim}]"),
+                actual: format!("{:?}", weight.dims()),
+            });
+        }
+        if bias.dims1()? != hidden_dim {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: format!("{}.layer_norm.bias", prefixes[0]),
+                expected: format!("[{hidden_dim}]"),
+                actual: format!("{:?}", bias.dims()),
+            });
+        }
         Some(LayerNorm {
-            weight: load_tensor_any(
-                tensors,
-                &candidate_layer_norm_keys(prefixes, "weight"),
-                device,
-            )?,
-            bias: load_tensor_any(
-                tensors,
-                &candidate_layer_norm_keys(prefixes, "bias"),
-                device,
-            )?,
+            weight,
+            bias,
             eps: 1.0e-5_f32,
         })
     } else {
@@ -878,11 +1016,28 @@ fn load_linear_or_identity(
         &[format!("{prefix}.weight"), format!("{prefix}.w")],
         device,
     )? {
+        if weight.dims2()? != (output_dim, input_dim) {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: format!("{prefix}.weight"),
+                expected: format!("[{output_dim}, {input_dim}]"),
+                actual: format!("{:?}", weight.dims()),
+            });
+        }
         let bias = load_tensor_any_optional(
             tensors,
             &[format!("{prefix}.bias"), format!("{prefix}.b")],
             device,
         )?;
+        if let Some(bias_tensor) = &bias {
+            let actual = bias_tensor.dims1()?;
+            if actual != output_dim {
+                return Err(WeatherGraphError::ShapeMismatch {
+                    name: format!("{prefix}.bias"),
+                    expected: format!("[{output_dim}]"),
+                    actual: format!("[{actual}]"),
+                });
+            }
+        }
         return Ok(LinearLayer { weight, bias });
     }
 
@@ -963,8 +1118,8 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     use super::{
-        KeislerGnn, Mlp, WeightInspectionReport, inspect_weight_keys, layer_norm_identity,
-        linear_identity,
+        KeislerGnn, Mlp, TensorMetadata, WeightInspectionReport, inspect_weight_keys,
+        inspect_weight_metadata, layer_norm_identity, linear_identity,
     };
     use crate::config::ModelConfig;
 
@@ -1173,6 +1328,34 @@ mod tests {
                 .missing_required
                 .contains(&"encoder_node_mlp.layers.0.weight".to_owned())
         );
+        assert!(report.shape_mismatches.is_empty());
         assert!(report.unused_keys.contains(&"unused.tensor".to_owned()));
+    }
+
+    #[test]
+    fn inspect_weights_reports_shape_mismatches() {
+        let config = ModelConfig {
+            input_channels: 2,
+            output_channels: 2,
+            hidden_dim: 3,
+            processor_blocks: 1,
+            use_layer_norm: true,
+        };
+        let report = inspect_weight_metadata(
+            &HashMap::from([(
+                "encoder_edge_mlp.layers.0.w".to_owned(),
+                TensorMetadata {
+                    shape: vec![2, 2],
+                    dtype: "F32".to_owned(),
+                },
+            )]),
+            &config,
+        );
+
+        assert!(report.shape_mismatches.iter().any(|mismatch| {
+            mismatch.canonical_key == "encoder_edge_mlp.layers.0.weight"
+                && mismatch.expected_shape == vec![3, 3]
+                && mismatch.actual_shape == vec![2, 2]
+        }));
     }
 }

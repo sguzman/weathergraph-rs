@@ -31,7 +31,7 @@ Recommended workflow for the first real parity pass:
 1. Run `tools/export_weights.py --source <upstream.pkl> --out <weights.safetensors> --dump-keys` to inspect raw flattened keys.
 2. If the heuristic aliases are insufficient, create a JSON key map based on `tools/weight_mapping.example.json`.
 3. Re-run `tools/export_weights.py --mapping-file <mapping.json>` to produce Rust-loader-compatible weights.
-4. Run `cargo run -p weathergraph-cli -- inspect-weights --weights <weights.safetensors>` to verify required Rust-side keys before attempting parity.
+4. Run `cargo run -p weathergraph-cli -- inspect-weights --weights <weights.safetensors> --input-channels 78 --output-channels 78 --hidden-dim 256` to verify required Rust-side keys, dtypes, and shapes before attempting parity.
 
 Tensor naming convention expected by the current Rust loader:
 

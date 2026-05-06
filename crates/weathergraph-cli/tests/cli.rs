@@ -222,6 +222,8 @@ fn inspect_weights_reports_missing_and_unused_keys() {
             "inspect-weights",
             "--weights",
             weights_path.to_str().expect("weights path"),
+            "--hidden-dim",
+            "2",
         ])
         .output()
         .expect("run inspect-weights");
@@ -229,10 +231,35 @@ fn inspect_weights_reports_missing_and_unused_keys() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains("Required coverage:"));
+    assert!(stdout.contains("Shape mismatches: 0"));
     assert!(stdout.contains("Missing required:"));
     assert!(stdout.contains("encoder_node_mlp.layers.0.weight"));
     assert!(stdout.contains("Unused keys:"));
     assert!(stdout.contains("unused.tensor"));
+}
+
+#[test]
+fn inspect_weights_reports_shape_mismatches_for_incompatible_config() {
+    let fixture_dir = build_fixture_dir();
+    let weights_path = fixture_dir.path().join("weights.safetensors");
+    write_safetensors_fixture(&weights_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
+        .args([
+            "inspect-weights",
+            "--weights",
+            weights_path.to_str().expect("weights path"),
+            "--hidden-dim",
+            "3",
+        ])
+        .output()
+        .expect("run inspect-weights");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("Shape mismatches:"));
+    assert!(stdout.contains("encoder_edge_mlp.layers.0.weight"));
+    assert!(stdout.contains("expected [3, 3] got [2, 2]"));
 }
 
 #[test]
