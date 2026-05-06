@@ -114,6 +114,7 @@ Inspect an exported checkpoint before trying parity or forecast:
 cargo run -p weathergraph-cli -- inspect-weights \
   --weights /path/to/weights.safetensors \
   --json \
+  --strict \
   --input-channels 78 \
   --output-channels 78 \
   --hidden-dim 256

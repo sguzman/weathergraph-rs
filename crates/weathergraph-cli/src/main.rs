@@ -38,6 +38,8 @@ enum Commands {
         weights: PathBuf,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        strict: bool,
         #[arg(long, default_value_t = 78)]
         input_channels: usize,
         #[arg(long, default_value_t = 78)]
@@ -88,6 +90,7 @@ fn main() -> Result<()> {
         Commands::InspectWeights {
             weights,
             json,
+            strict,
             input_channels,
             output_channels,
             hidden_dim,
@@ -95,6 +98,7 @@ fn main() -> Result<()> {
         } => inspect_weights(
             &weights,
             json,
+            strict,
             input_channels,
             output_channels,
             hidden_dim,
@@ -164,6 +168,7 @@ fn inspect_geometry() -> Result<()> {
 fn inspect_weights(
     weights: &PathBuf,
     json: bool,
+    strict: bool,
     input_channels: usize,
     output_channels: usize,
     hidden_dim: usize,
@@ -178,7 +183,7 @@ fn inspect_weights(
     let report = KeislerGnn::inspect_safetensors(weights, &config)?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-        return Ok(());
+        return enforce_strict_weight_report(&report, strict);
     }
     println!("Weights: {}", weights.display());
     println!("Available keys: {}", report.available_keys.len());
@@ -229,6 +234,25 @@ fn inspect_weights(
         for key in &report.unused_keys {
             println!("  - {key}");
         }
+    }
+    enforce_strict_weight_report(&report, strict)
+}
+
+fn enforce_strict_weight_report(
+    report: &weathergraph_core::model::WeightInspectionReport,
+    strict: bool,
+) -> Result<()> {
+    if strict
+        && (!report.missing_required.is_empty()
+            || !report.shape_mismatches.is_empty()
+            || !report.dtype_mismatches.is_empty())
+    {
+        anyhow::bail!(
+            "strict weight inspection failed: {} missing required, {} shape mismatches, {} dtype mismatches",
+            report.missing_required.len(),
+            report.shape_mismatches.len(),
+            report.dtype_mismatches.len()
+        );
     }
     Ok(())
 }

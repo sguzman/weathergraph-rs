@@ -296,6 +296,55 @@ fn inspect_weights_supports_json_output() {
 }
 
 #[test]
+fn inspect_weights_strict_mode_fails_on_missing_required() {
+    let fixture_dir = build_fixture_dir();
+    let weights_path = fixture_dir.path().join("weights.safetensors");
+    write_safetensors_fixture(&weights_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
+        .args([
+            "inspect-weights",
+            "--weights",
+            weights_path.to_str().expect("weights path"),
+            "--hidden-dim",
+            "2",
+            "--strict",
+        ])
+        .output()
+        .expect("run inspect-weights strict");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).expect("stderr");
+    assert!(stderr.contains("strict weight inspection failed"));
+    assert!(stderr.contains("missing required"));
+}
+
+#[test]
+fn inspect_weights_strict_mode_with_json_still_prints_report() {
+    let fixture_dir = build_fixture_dir();
+    let weights_path = fixture_dir.path().join("weights.safetensors");
+    write_safetensors_fixture(&weights_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
+        .args([
+            "inspect-weights",
+            "--weights",
+            weights_path.to_str().expect("weights path"),
+            "--hidden-dim",
+            "2",
+            "--json",
+            "--strict",
+        ])
+        .output()
+        .expect("run inspect-weights strict json");
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    let payload: Value = serde_json::from_str(&stdout).expect("json payload");
+    assert!(payload["missing_required"].is_array());
+}
+
+#[test]
 fn forecast_requires_weights() {
     let fixture_dir = build_fixture_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
