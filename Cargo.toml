@@ -1,6 +1,44 @@
-[package]
-name = "weathergraph-rs"
+[workspace]
+members = [
+    "crates/weathergraph-core",
+    "crates/weathergraph-cli",
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/example/weathergraph-rs"
+rust-version = "1.86"
 
-[dependencies]
+[workspace.dependencies]
+anyhow = "1.0.102"
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+chrono = { version = "0.4.44", features = ["serde"] }
+clap = { version = "4.6.1", features = ["derive"] }
+flate2 = "1.1.9"
+h3o = "0.9.5"
+ndarray = "0.17.2"
+ndarray-npy = "0.10.0"
+safetensors = "0.7.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tempfile = "3.23.0"
+thiserror = "2.0.18"
+toml = "1.1.2"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+
+[workspace.lints.rust]
+unsafe_code = "deny"

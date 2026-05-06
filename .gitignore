@@ -1,4 +1,8 @@
 /target
-logs
-.cache
-tmp
+*.nc
+*.npz
+*.npz.gz
+*.pkl
+*.safetensors
+/.idea
+

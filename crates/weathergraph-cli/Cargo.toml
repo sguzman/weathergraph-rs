@@ -1,0 +1,29 @@
+[package]
+name = "weathergraph-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "weathergraph"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+weathergraph-core = { path = "../weathergraph-core" }
+
+[dev-dependencies]
+flate2.workspace = true
+ndarray.workspace = true
+ndarray-npy.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
