@@ -59,20 +59,61 @@ fn build_fixture_dir() -> tempfile::TempDir {
         ]),
     );
 
-    for name in [
-        "node_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
-        "node_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz",
-        "node_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
-        "edge_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
-        "edge_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz",
-        "edge_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
-    ] {
-        write_npz_gz(
-            &data_dir.join(name),
-            vec![("local_coords", Array2::<f32>::zeros((2, 2)))],
-            None,
-        );
-    }
+    write_npz_gz(
+        &data_dir.join(
+            "node_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
+        ),
+        vec![
+            ("coslat", Array2::<f32>::zeros((71042, 1))),
+            ("sinlat", Array2::<f32>::zeros((71042, 1))),
+            ("coslon", Array2::<f32>::zeros((71042, 1))),
+            ("sinlon", Array2::<f32>::zeros((71042, 1))),
+        ],
+        None,
+    );
+    write_npz_gz(
+        &data_dir
+            .join("node_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz"),
+        vec![
+            ("coslat", Array2::<f32>::zeros((5882, 1))),
+            ("sinlat", Array2::<f32>::zeros((5882, 1))),
+            ("coslon", Array2::<f32>::zeros((5882, 1))),
+            ("sinlon", Array2::<f32>::zeros((5882, 1))),
+        ],
+        None,
+    );
+    write_npz_gz(
+        &data_dir.join(
+            "node_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
+        ),
+        vec![
+            ("coslat", Array2::<f32>::zeros((71042, 1))),
+            ("sinlat", Array2::<f32>::zeros((71042, 1))),
+            ("coslon", Array2::<f32>::zeros((71042, 1))),
+            ("sinlon", Array2::<f32>::zeros((71042, 1))),
+        ],
+        None,
+    );
+    write_npz_gz(
+        &data_dir.join(
+            "edge_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
+        ),
+        vec![("local_coords", Array2::<f32>::zeros((2, 2)))],
+        None,
+    );
+    write_npz_gz(
+        &data_dir
+            .join("edge_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz"),
+        vec![("local_coords", Array2::<f32>::zeros((1, 2)))],
+        None,
+    );
+    write_npz_gz(
+        &data_dir.join(
+            "edge_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
+        ),
+        vec![("local_coords", Array2::<f32>::zeros((2, 2)))],
+        None,
+    );
 
     write_npz_gz(
         &data_dir.join(

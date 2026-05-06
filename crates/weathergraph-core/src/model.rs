@@ -6,6 +6,8 @@ use safetensors::SafeTensors;
 
 use crate::config::ModelConfig;
 use crate::error::{Result, WeatherGraphError};
+use crate::graph::GraphSet;
+use crate::tensor::{aggregate_receivers, gather_rows};
 
 #[derive(Debug, Clone)]
 pub struct LinearLayer {
@@ -235,6 +237,241 @@ impl KeislerGnn {
         current = self.decoder_node_mlp.forward(&current)?;
         self.output_projection.forward(&current)
     }
+
+    pub fn one_step_graph(
+        &self,
+        state: &Tensor,
+        graphs: &GraphSet,
+        solar: &Tensor,
+        doy: &Tensor,
+        orography: &Tensor,
+        landsea: &Tensor,
+    ) -> Result<Tensor> {
+        let projected_state = self.input_projection.forward(state)?;
+
+        let sender_state = gather_rows(&projected_state, &graphs.encoder.senders)?;
+        let sender_solar = gather_rows(solar, &graphs.encoder.senders)?;
+        let sender_orography = gather_rows(orography, &graphs.encoder.senders)?;
+        let sender_landsea = gather_rows(landsea, &graphs.encoder.senders)?;
+        let sender_coslat =
+            gather_rows(&graphs.encoder.node_tensors.coslat, &graphs.encoder.senders)?;
+        let sender_sinlat =
+            gather_rows(&graphs.encoder.node_tensors.sinlat, &graphs.encoder.senders)?;
+        let sender_coslon =
+            gather_rows(&graphs.encoder.node_tensors.coslon, &graphs.encoder.senders)?;
+        let sender_sinlon =
+            gather_rows(&graphs.encoder.node_tensors.sinlon, &graphs.encoder.senders)?;
+        let sender_doy = gather_rows(doy, &graphs.encoder.senders)?;
+
+        let encoder_edge_input = concat_tensors(&[
+            &graphs.encoder.edge_tensors.local_coords_row,
+            &sender_state,
+            &sender_solar,
+            &sender_orography,
+            &sender_landsea,
+            &sender_coslat,
+            &sender_sinlat,
+            &sender_coslon,
+            &sender_sinlon,
+            &sender_doy,
+        ])?;
+        let encoder_edge_hidden = self.encoder_edge_mlp.forward(&encoder_edge_input)?;
+        let encoder_agg = aggregate_receivers(
+            &encoder_edge_hidden,
+            &graphs.encoder.receivers,
+            graphs.encoder.n_nodes,
+        )?;
+        let encoder_node_input =
+            elementwise_mul(&encoder_agg, &graphs.encoder.node_tensors.inv_n_senders)?;
+        let encoder_hidden = self.encoder_node_mlp.forward(&encoder_node_input)?;
+
+        let mut processor_edge_hidden = self
+            .encoder_edge_mlp
+            .forward(&graphs.processor.edge_tensors.local_coords_row)?;
+        let mut processor_node_hidden =
+            slice_rows(&encoder_hidden, graphs.n_era5_nodes, graphs.n_h3_nodes)?;
+
+        for _ in 0..self.n_processor_blocks {
+            let sender_node_hidden =
+                gather_rows(&processor_node_hidden, &graphs.processor.senders)?;
+            let receiver_node_hidden =
+                gather_rows(&processor_node_hidden, &graphs.processor.receivers)?;
+            let processor_edge_input = concat_tensors(&[
+                &processor_edge_hidden,
+                &sender_node_hidden,
+                &receiver_node_hidden,
+            ])?;
+            let processor_edge_delta = self.processor_edge_mlp.forward(&processor_edge_input)?;
+            processor_edge_hidden = add_tensors(&processor_edge_hidden, &processor_edge_delta)?;
+
+            let agg_sender = aggregate_receivers(
+                &processor_edge_hidden,
+                &graphs.processor.senders,
+                graphs.processor.n_nodes,
+            )?;
+            let agg_receiver = aggregate_receivers(
+                &processor_edge_hidden,
+                &graphs.processor.receivers,
+                graphs.processor.n_nodes,
+            )?;
+            let processor_node_input = concat_tensors(&[
+                &processor_node_hidden,
+                &graphs.processor.node_tensors.coslat,
+                &graphs.processor.node_tensors.sinlat,
+                &graphs.processor.node_tensors.coslon,
+                &graphs.processor.node_tensors.sinlon,
+                &elementwise_mul(&agg_sender, &graphs.processor.node_tensors.inv_n_receivers)?,
+                &elementwise_mul(&agg_receiver, &graphs.processor.node_tensors.inv_n_senders)?,
+            ])?;
+            let processor_node_delta = self.processor_node_mlp.forward(&processor_node_input)?;
+            processor_node_hidden = add_tensors(&processor_node_hidden, &processor_node_delta)?;
+        }
+
+        let (_, hidden_dim) = processor_node_hidden.dims2()?;
+        let full_hidden = pad_h3_hidden(
+            &processor_node_hidden,
+            graphs.n_total_nodes,
+            graphs.n_era5_nodes,
+            hidden_dim,
+        )?;
+        let decoder_sender_hidden = gather_rows(&full_hidden, &graphs.decoder.senders)?;
+        let decoder_receiver_data = gather_rows(&projected_state, &graphs.decoder.receivers)?;
+        let decoder_edge_input = concat_tensors(&[
+            &graphs.decoder.edge_tensors.local_coords_row,
+            &decoder_sender_hidden,
+            &decoder_receiver_data,
+        ])?;
+        let decoder_edge_hidden = self.decoder_edge_mlp.forward(&decoder_edge_input)?;
+        let decoder_agg = aggregate_receivers(
+            &decoder_edge_hidden,
+            &graphs.decoder.receivers,
+            graphs.decoder.n_nodes,
+        )?;
+        let decoder_node_input = concat_tensors(&[
+            &projected_state,
+            &elementwise_mul(&decoder_agg, &graphs.decoder.node_tensors.inv_n_senders)?,
+        ])?;
+        let decoder_hidden = self.decoder_node_mlp.forward(&decoder_node_input)?;
+        self.output_projection.forward(&decoder_hidden)
+    }
+}
+
+fn concat_tensors(tensors: &[&Tensor]) -> Result<Tensor> {
+    let rows = tensors
+        .first()
+        .map_or(0, |tensor| tensor.dims2().map_or(0, |dims| dims.0));
+    let mut pieces = Vec::with_capacity(tensors.len());
+    let mut total_width = 0_usize;
+    for tensor in tensors {
+        let (tensor_rows, width) = tensor.dims2()?;
+        if tensor_rows != rows {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: "concat_tensors".to_owned(),
+                expected: rows.to_string(),
+                actual: tensor_rows.to_string(),
+            });
+        }
+        total_width += width;
+        pieces.push(tensor.to_vec2::<f32>()?);
+    }
+
+    let mut values = Vec::with_capacity(rows * total_width);
+    for row in 0..rows {
+        for piece in &pieces {
+            values.extend_from_slice(&piece[row]);
+        }
+    }
+    Ok(Tensor::from_vec(values, (rows, total_width), &Device::Cpu)?)
+}
+
+fn add_tensors(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    let left = lhs.to_vec2::<f32>()?;
+    let right = rhs.to_vec2::<f32>()?;
+    if left.len() != right.len()
+        || left.first().map_or(0, Vec::len) != right.first().map_or(0, Vec::len)
+    {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: "add_tensors".to_owned(),
+            expected: format!("{:?}", lhs.dims()),
+            actual: format!("{:?}", rhs.dims()),
+        });
+    }
+    let width = left.first().map_or(0, Vec::len);
+    let values = left
+        .into_iter()
+        .zip(right)
+        .flat_map(|(lhs_row, rhs_row)| lhs_row.into_iter().zip(rhs_row).map(|(l, r)| l + r))
+        .collect::<Vec<_>>();
+    let batch = values.len() / width;
+    Ok(Tensor::from_vec(values, (batch, width), &Device::Cpu)?)
+}
+
+fn elementwise_mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    let left = lhs.to_vec2::<f32>()?;
+    let right = rhs.to_vec2::<f32>()?;
+    if left.len() != right.len() {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: "elementwise_mul".to_owned(),
+            expected: left.len().to_string(),
+            actual: right.len().to_string(),
+        });
+    }
+    let right_width = right.first().map_or(0, Vec::len);
+    let left_width = left.first().map_or(0, Vec::len);
+    if right_width != 1 && right_width != left_width {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: "elementwise_mul".to_owned(),
+            expected: format!("rhs width 1 or {left_width}"),
+            actual: right_width.to_string(),
+        });
+    }
+    let values = left
+        .into_iter()
+        .zip(right)
+        .flat_map(|(lhs_row, rhs_row)| {
+            lhs_row.into_iter().enumerate().map(move |(index, value)| {
+                let scale = if rhs_row.len() == 1 {
+                    rhs_row[0]
+                } else {
+                    rhs_row[index]
+                };
+                value * scale
+            })
+        })
+        .collect::<Vec<_>>();
+    let batch = values.len() / left_width;
+    Ok(Tensor::from_vec(values, (batch, left_width), &Device::Cpu)?)
+}
+
+fn slice_rows(tensor: &Tensor, start: usize, len: usize) -> Result<Tensor> {
+    let values = tensor.to_vec2::<f32>()?;
+    let width = values.first().map_or(0, Vec::len);
+    let slice = values
+        .into_iter()
+        .skip(start)
+        .take(len)
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(Tensor::from_vec(slice, (len, width), &Device::Cpu)?)
+}
+
+fn pad_h3_hidden(
+    h3_hidden: &Tensor,
+    total_nodes: usize,
+    era5_nodes: usize,
+    hidden_dim: usize,
+) -> Result<Tensor> {
+    let mut values = vec![0.0_f32; total_nodes * hidden_dim];
+    let h3_values = h3_hidden.to_vec2::<f32>()?;
+    for (row_index, row) in h3_values.iter().enumerate() {
+        let offset = (era5_nodes + row_index) * hidden_dim;
+        values[offset..offset + hidden_dim].copy_from_slice(row);
+    }
+    Ok(Tensor::from_vec(
+        values,
+        (total_nodes, hidden_dim),
+        &Device::Cpu,
+    )?)
 }
 
 fn relu(tensor: &Tensor) -> Result<Tensor> {

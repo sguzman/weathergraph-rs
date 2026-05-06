@@ -1,4 +1,5 @@
 use candle_core::{Device, Tensor};
+use chrono::Datelike;
 
 use crate::config::{Config, ForecastRequest};
 use crate::error::{Result, WeatherGraphError};
@@ -74,9 +75,43 @@ impl Runner {
             ));
         }
 
-        let _solar = solar_features(request.init, step_index);
+        let solar_value = solar_features(request.init, step_index);
+        let solar = Tensor::from_vec(
+            solar_value
+                .iter()
+                .copied()
+                .cycle()
+                .take(self.graphs.n_total_nodes * solar_value.len())
+                .collect::<Vec<_>>(),
+            (self.graphs.n_total_nodes, solar_value.len()),
+            &self.device,
+        )?;
+        #[allow(clippy::cast_precision_loss)]
+        let doy_scalar = (request.init.ordinal0() as f32) / 365.0;
+        let doy = Tensor::from_vec(
+            vec![doy_scalar; self.graphs.n_total_nodes],
+            (self.graphs.n_total_nodes, 1),
+            &self.device,
+        )?;
+        let (orography_values, landsea_values) = self
+            .normalizer
+            .encoder_surface_features(self.graphs.n_total_nodes);
+        let orography = Tensor::from_vec(
+            orography_values,
+            (self.graphs.n_total_nodes, 1),
+            &self.device,
+        )?;
+        let landsea =
+            Tensor::from_vec(landsea_values, (self.graphs.n_total_nodes, 1), &self.device)?;
         let normalized = self.normalizer.normalize(state)?;
-        let output = self.model.one_step(&normalized)?;
+        let output = self.model.one_step_graph(
+            &normalized,
+            &self.graphs,
+            &solar,
+            &doy,
+            &orography,
+            &landsea,
+        )?;
         self.normalizer.denormalize(&output)
     }
 

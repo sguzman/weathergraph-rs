@@ -1,11 +1,28 @@
 use std::path::Path;
 
+use candle_core::{Device, Tensor};
+
 use crate::config::DataConfig;
 use crate::error::{Result, WeatherGraphError};
 use crate::features::FeatureBundle;
 use crate::geometry::{ERA5_NODE_COUNT, H3_NODE_COUNT, TOTAL_NODE_COUNT};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
+pub struct StaticNodeFeatureTensors {
+    pub coslat: Tensor,
+    pub sinlat: Tensor,
+    pub coslon: Tensor,
+    pub sinlon: Tensor,
+    pub inv_n_senders: Tensor,
+    pub inv_n_receivers: Tensor,
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticEdgeFeatureTensors {
+    pub local_coords_row: Tensor,
+}
+
+#[derive(Debug, Clone)]
 pub struct StaticGraph {
     pub name: String,
     pub n_nodes: usize,
@@ -16,9 +33,11 @@ pub struct StaticGraph {
     pub edge_features: FeatureBundle,
     pub node_feature_keys: Vec<String>,
     pub edge_feature_keys: Vec<String>,
+    pub node_tensors: StaticNodeFeatureTensors,
+    pub edge_tensors: StaticEdgeFeatureTensors,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct GraphSet {
     pub encoder: StaticGraph,
     pub processor: StaticGraph,
@@ -112,6 +131,8 @@ fn load_graph(
         .iter()
         .map(|entry| entry.stem().to_owned())
         .collect::<Vec<_>>();
+    let node_tensors = load_node_tensors(&node_features, n_nodes, &senders, &receivers)?;
+    let edge_tensors = load_edge_tensors(&edge_features, senders.len())?;
 
     Ok(StaticGraph {
         name: kind.as_str().to_owned(),
@@ -123,7 +144,93 @@ fn load_graph(
         edge_features,
         node_feature_keys,
         edge_feature_keys,
+        node_tensors,
+        edge_tensors,
     })
+}
+
+fn load_node_tensors(
+    bundle: &FeatureBundle,
+    n_nodes: usize,
+    senders: &[u32],
+    receivers: &[u32],
+) -> Result<StaticNodeFeatureTensors> {
+    let coslat = load_or_zeros(bundle, &["coslat"], n_nodes)?;
+    let sinlat = load_or_zeros(bundle, &["sinlat"], n_nodes)?;
+    let coslon = load_or_zeros(bundle, &["coslon"], n_nodes)?;
+    let sinlon = load_or_zeros(bundle, &["sinlon"], n_nodes)?;
+    let inv_n_senders = inverse_counts(receivers, n_nodes)?;
+    let inv_n_receivers = inverse_counts(senders, n_nodes)?;
+
+    Ok(StaticNodeFeatureTensors {
+        coslat,
+        sinlat,
+        coslon,
+        sinlon,
+        inv_n_senders,
+        inv_n_receivers,
+    })
+}
+
+fn load_edge_tensors(bundle: &FeatureBundle, n_edges: usize) -> Result<StaticEdgeFeatureTensors> {
+    let local_coords_row = load_or_zeros(bundle, &["local_coords_row", "local_coords"], n_edges)?;
+    Ok(StaticEdgeFeatureTensors { local_coords_row })
+}
+
+fn load_or_zeros(
+    bundle: &FeatureBundle,
+    candidates: &[&str],
+    expected_rows: usize,
+) -> Result<Tensor> {
+    let array = match bundle.get_f32(candidates) {
+        Ok(array) => array,
+        Err(_) => ndarray::Array2::<f32>::zeros((expected_rows, 1)).into_dyn(),
+    };
+
+    let shape = array.shape().to_vec();
+    if shape.is_empty() {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: candidates.join("/"),
+            expected: "at least 1 dimension".to_owned(),
+            actual: "scalar".to_owned(),
+        });
+    }
+
+    if shape[0] != expected_rows {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: candidates.join("/"),
+            expected: expected_rows.to_string(),
+            actual: shape[0].to_string(),
+        });
+    }
+
+    let width = shape.iter().skip(1).product::<usize>().max(1);
+    let values = array.iter().copied().collect::<Vec<_>>();
+    Ok(Tensor::from_vec(
+        values,
+        (expected_rows, width),
+        &Device::Cpu,
+    )?)
+}
+
+fn inverse_counts(indices: &[u32], n_nodes: usize) -> Result<Tensor> {
+    let mut counts = vec![0.0_f32; n_nodes];
+    for &index in indices {
+        let index = usize::try_from(index)
+            .map_err(|_| WeatherGraphError::InvalidConfig("index does not fit usize".to_owned()))?;
+        if index >= n_nodes {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: "inverse_counts".to_owned(),
+                expected: format!("index < {n_nodes}"),
+                actual: index.to_string(),
+            });
+        }
+        counts[index] += 1.0;
+    }
+    for count in &mut counts {
+        *count = if *count > 0.0 { 1.0 / *count } else { 0.0 };
+    }
+    Ok(Tensor::from_vec(counts, (n_nodes, 1), &Device::Cpu)?)
 }
 
 fn select_named_array<'a>(
