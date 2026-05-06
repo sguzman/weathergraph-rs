@@ -65,3 +65,14 @@ data/
 - Large upstream artifacts should not be committed into this repository.
 - Tiny synthetic test fixtures are acceptable for tests.
 
+## One-Step Parity Fixture
+
+Use `tools/export_parity_fixture.py` from an environment where the upstream Python model can run to produce:
+
+```text
+tests/fixtures/parity/one_step/
+├── manifest.json
+└── tensors.safetensors
+```
+
+This fixture is consumed by the Rust test harness at `crates/weathergraph-core/tests/parity_fixture.rs`. It allows comparing one exported upstream one-step output against the Rust graph-aware one-step path under a declared `max_abs_error` tolerance.

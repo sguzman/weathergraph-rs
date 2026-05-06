@@ -151,6 +151,8 @@ The codebase includes:
 
 Parity against real upstream tensors is intentionally gated behind external fixtures and exported weights.
 
+To run a real one-step parity check, export a fixture into `tests/fixtures/parity/one_step/` using `tools/export_parity_fixture.py`. When `manifest.json` and `tensors.safetensors` are present there, `cargo test --workspace` will automatically execute the parity comparison in addition to the synthetic unit/integration tests.
+
 ## Deferred Work
 
 - Match the original Haiku parameter layout exactly and validate one-step numerical parity
@@ -158,4 +160,3 @@ Parity against real upstream tensors is intentionally gated behind external fixt
 - Implement autoregressive rollout
 - Write NetCDF forecast output
 - Add recent ECMWF Open Data ingestion for real-time initialization
-
