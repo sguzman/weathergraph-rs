@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Export upstream Haiku weights to safetensors for weathergraph-rs."""
+"""Export upstream Haiku weights to safetensors for weathergraph-rs.
+
+The exporter supports three workflows:
+
+1. Dump the discovered raw parameter keys for inspection.
+2. Apply an explicit JSON mapping from raw keys to Rust loader keys.
+3. Apply a small heuristic alias pass for the known GNN update function names.
+"""
 
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import pickle
 import sys
@@ -22,6 +30,20 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Path to the output safetensors file that weathergraph-rs will consume",
     )
+    parser.add_argument(
+        "--mapping-file",
+        help="Optional JSON file mapping raw flattened Haiku keys to Rust loader keys",
+    )
+    parser.add_argument(
+        "--dump-keys",
+        action="store_true",
+        help="Print the discovered flattened raw keys to stderr before export",
+    )
+    parser.add_argument(
+        "--no-auto-alias",
+        action="store_true",
+        help="Disable heuristic renaming of common upstream module/function names",
+    )
     return parser.parse_args()
 
 
@@ -36,14 +58,23 @@ def main() -> int:
     with source.open("rb") as handle:
         payload: Any = pickle.load(handle)
 
-    flat = flatten_params(payload)
-    if not flat:
+    flat_raw = flatten_params(payload)
+    if not flat_raw:
         raise ValueError("no tensor-like arrays were found in the source pickle")
 
+    if args.dump_keys:
+        print("Discovered flattened parameter keys:", file=sys.stderr)
+        for key in sorted(flat_raw):
+            print(f"  {key}", file=sys.stderr)
+
+    mapping = load_mapping(args.mapping_file)
+    flat_mapped = remap_keys(flat_raw, mapping, auto_alias=not args.no_auto_alias)
+    ensure_unique_keys(flat_mapped)
+
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_file(flat, str(out))
+    save_file(flat_mapped, str(out))
     print(f"Loaded upstream pickle type: {type(payload)!r}", file=sys.stderr)
-    print(f"Exported {len(flat)} tensors to {out}", file=sys.stderr)
+    print(f"Exported {len(flat_mapped)} tensors to {out}", file=sys.stderr)
     return 0
 
 
@@ -69,6 +100,97 @@ def flatten_params(payload: Any) -> dict[str, np.ndarray]:
 
     visit(payload, ())
     return flat
+
+
+def load_mapping(path: str | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    mapping_path = pathlib.Path(path)
+    with mapping_path.open("r", encoding="utf-8") as handle:
+        mapping = json.load(handle)
+    if not isinstance(mapping, dict):
+        raise ValueError("mapping file must contain a JSON object of raw_key -> rust_key")
+    return {str(key): str(value) for key, value in mapping.items()}
+
+
+def remap_keys(
+    tensors: dict[str, np.ndarray],
+    explicit_mapping: dict[str, str],
+    *,
+    auto_alias: bool,
+) -> dict[str, np.ndarray]:
+    remapped: dict[str, np.ndarray] = {}
+    for raw_key, value in tensors.items():
+        mapped_key = explicit_mapping.get(raw_key)
+        if mapped_key is None and auto_alias:
+            mapped_key = alias_key(raw_key)
+        if mapped_key is None:
+            mapped_key = raw_key
+        remapped[mapped_key] = value
+    return remapped
+
+
+def alias_key(raw_key: str) -> str | None:
+    module_prefix = infer_module_prefix(raw_key)
+    if module_prefix is None:
+        return None
+
+    if ".layer_norm." in raw_key or raw_key.endswith(".scale") or raw_key.endswith(".offset"):
+        return map_layer_norm_key(raw_key, module_prefix)
+
+    if raw_key.endswith(".w") or raw_key.endswith(".b"):
+        return map_linear_key(raw_key, module_prefix)
+
+    return None
+
+
+def infer_module_prefix(raw_key: str) -> str | None:
+    module_map = {
+        "edge_update_fn_encoder": "encoder_edge_mlp",
+        "node_update_fn_encoder": "encoder_node_mlp",
+        "edge_update_fn_processor": "processor_edge_mlp",
+        "node_update_fn_processor": "processor_node_mlp",
+        "edge_update_fn_decoder": "decoder_edge_mlp",
+        "node_update_fn_decoder": "decoder_node_mlp",
+    }
+
+    for needle, prefix in module_map.items():
+        if needle in raw_key:
+            return prefix
+
+    if "net_edges" in raw_key:
+        return "processor_edge_init_mlp"
+
+    return None
+
+
+def map_linear_key(raw_key: str, module_prefix: str) -> str:
+    if ".linear_1." in raw_key:
+        layer_idx = 1
+    else:
+        layer_idx = 0
+    suffix = "weight" if raw_key.endswith(".w") else "bias"
+    return f"{module_prefix}.layers.{layer_idx}.{suffix}"
+
+
+def map_layer_norm_key(raw_key: str, module_prefix: str) -> str:
+    if raw_key.endswith(".scale"):
+        suffix = "weight"
+    elif raw_key.endswith(".offset"):
+        suffix = "bias"
+    elif raw_key.endswith(".weight"):
+        suffix = "weight"
+    else:
+        suffix = "bias"
+    return f"{module_prefix}.layer_norm.{suffix}"
+
+
+def ensure_unique_keys(tensors: dict[str, np.ndarray]) -> None:
+    seen: set[str] = set()
+    for key in tensors:
+        if key in seen:
+            raise ValueError(f"duplicate mapped tensor key after remap: {key}")
+        seen.add(key)
 
 
 def maybe_array(node: Any) -> np.ndarray | None:

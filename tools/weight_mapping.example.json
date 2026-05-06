@@ -1,0 +1,8 @@
+{
+  "one_step_fn.edge_update_fn_encoder.linear.w": "encoder_edge_mlp.layers.0.weight",
+  "one_step_fn.edge_update_fn_encoder.linear.b": "encoder_edge_mlp.layers.0.bias",
+  "one_step_fn.edge_update_fn_encoder.linear_1.w": "encoder_edge_mlp.layers.1.weight",
+  "one_step_fn.edge_update_fn_encoder.linear_1.b": "encoder_edge_mlp.layers.1.bias",
+  "one_step_fn.edge_update_fn_encoder.layer_norm.scale": "encoder_edge_mlp.layer_norm.weight",
+  "one_step_fn.edge_update_fn_encoder.layer_norm.offset": "encoder_edge_mlp.layer_norm.bias"
+}

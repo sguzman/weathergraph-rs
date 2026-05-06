@@ -26,6 +26,12 @@ Use `tools/export_weights.py` against the original upstream `.pkl` weight file. 
 4. Preserve `f32` dtype.
 5. Preserve original tensor shapes.
 
+Recommended workflow for the first real parity pass:
+
+1. Run `tools/export_weights.py --source <upstream.pkl> --out <weights.safetensors> --dump-keys` to inspect raw flattened keys.
+2. If the heuristic aliases are insufficient, create a JSON key map based on `tools/weight_mapping.example.json`.
+3. Re-run `tools/export_weights.py --mapping-file <mapping.json>` to produce Rust-loader-compatible weights.
+
 Tensor naming convention expected by the current Rust loader:
 
 - `encoder_edge_mlp.layers.0.weight`
@@ -38,6 +44,7 @@ Tensor naming convention expected by the current Rust loader:
 Repeat the same structure for:
 
 - `encoder_node_mlp`
+- `processor_edge_init_mlp`
 - `processor_edge_mlp`
 - `processor_node_mlp`
 - `decoder_edge_mlp`
@@ -64,6 +71,7 @@ data/
 - The Rust side does not read Python pickle directly.
 - Large upstream artifacts should not be committed into this repository.
 - Tiny synthetic test fixtures are acceptable for tests.
+- `tools/export_weights.py` supports explicit remapping through `--mapping-file` and light heuristic aliasing for the known upstream GNN update functions.
 
 ## One-Step Parity Fixture
 
