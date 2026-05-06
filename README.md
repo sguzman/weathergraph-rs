@@ -75,7 +75,7 @@ The reference implementation lives in [`rkeisler/keisler-2022`](https://github.c
 4. Autoregressive rollout for longer forecasts
 
 The Rust port does not read the original Python pickle weights directly. The boundary is an export tool that flattens the upstream Haiku parameter tree into `safetensors`.
-That exporter now supports raw-key inspection, unresolved-key reporting, and explicit key remapping so the upstream Haiku module names can be reconciled with the Rust loader contract incrementally.
+That exporter now supports raw-key inspection, unresolved-key reporting, dry-run coverage checks, and explicit key remapping so the upstream Haiku module names can be reconciled with the Rust loader contract incrementally.
 
 ## Artifact Expectations
 

@@ -28,9 +28,9 @@ Use `tools/export_weights.py` against the original upstream `.pkl` weight file. 
 
 Recommended workflow for the first real parity pass:
 
-1. Run `tools/export_weights.py --source <upstream.pkl> --out <weights.safetensors> --dump-keys --emit-unmapped <unmapped.json>` to inspect raw flattened keys and capture any keys that still need manual remapping.
+1. Run `tools/export_weights.py --source <upstream.pkl> --out <weights.safetensors> --dump-keys --emit-unmapped <unmapped.json> --dry-run` to inspect raw flattened keys and capture any keys that still need manual remapping before writing a `safetensors` file.
 2. If the heuristic aliases are insufficient, create a JSON key map based on `tools/weight_mapping.example.json`.
-3. Re-run `tools/export_weights.py --mapping-file <mapping.json>` to produce Rust-loader-compatible weights.
+3. Re-run `tools/export_weights.py --mapping-file <mapping.json>` without `--dry-run` to produce Rust-loader-compatible weights.
 4. Run `cargo run -p weathergraph-cli -- inspect-weights --weights <weights.safetensors> --input-channels 78 --output-channels 78 --hidden-dim 256` to verify required Rust-side keys, dtypes, and shapes before attempting parity.
 
 Tensor naming convention expected by the current Rust loader:
@@ -72,7 +72,7 @@ data/
 - The Rust side does not read Python pickle directly.
 - Large upstream artifacts should not be committed into this repository.
 - Tiny synthetic test fixtures are acceptable for tests.
-- `tools/export_weights.py` supports explicit remapping through `--mapping-file`, light heuristic aliasing for the known upstream GNN update functions, and `--emit-unmapped` for reporting the raw keys that still need manual attention.
+- `tools/export_weights.py` supports explicit remapping through `--mapping-file`, light heuristic aliasing for the known upstream GNN update functions, `--emit-unmapped` for reporting the raw keys that still need manual attention, and `--dry-run` for coverage inspection without writing `safetensors`.
 
 ## One-Step Parity Fixture
 

@@ -20,7 +20,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
-from safetensors.numpy import save_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +47,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--emit-unmapped",
         help="Optional path to write raw flattened keys that still need manual mapping after aliasing",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Skip writing safetensors and only report remapped/unmapped key coverage",
     )
     return parser.parse_args()
 
@@ -77,11 +81,26 @@ def main() -> int:
     ensure_unique_keys(flat_mapped)
 
     out.parent.mkdir(parents=True, exist_ok=True)
-    save_file(flat_mapped, str(out))
+    if not args.dry_run:
+        try:
+            from safetensors.numpy import save_file
+        except ImportError as error:
+            raise SystemExit(
+                "Writing safetensors requires the Python `safetensors` package. "
+                "Re-run with --dry-run to inspect key mapping without it."
+            ) from error
+
+        save_file(flat_mapped, str(out))
     if args.emit_unmapped:
         emit_unmapped(pathlib.Path(args.emit_unmapped), unmapped)
     print(f"Loaded upstream pickle type: {type(payload)!r}", file=sys.stderr)
-    print(f"Exported {len(flat_mapped)} tensors to {out}", file=sys.stderr)
+    if args.dry_run:
+        print(
+            f"Dry run mapped {len(flat_mapped)} tensors; no safetensors file was written",
+            file=sys.stderr,
+        )
+    else:
+        print(f"Exported {len(flat_mapped)} tensors to {out}", file=sys.stderr)
     if unmapped:
         print(
             f"{len(unmapped)} raw keys still require manual review or mapping",
