@@ -12,6 +12,7 @@ use weathergraph_core::geometry::{
     verify_geometry_counts,
 };
 use weathergraph_core::graph::GraphSet;
+use weathergraph_core::model::KeislerGnn;
 use weathergraph_core::runner::Runner;
 
 #[derive(Debug, Parser)]
@@ -31,6 +32,10 @@ enum Commands {
     InspectGeometry {
         #[arg(long)]
         data_dir: Option<PathBuf>,
+    },
+    InspectWeights {
+        #[arg(long)]
+        weights: PathBuf,
     },
     Forecast {
         #[arg(long)]
@@ -70,6 +75,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::InspectArtifacts { data_dir } => inspect_artifacts(&data_dir)?,
         Commands::InspectGeometry { data_dir: _ } => inspect_geometry()?,
+        Commands::InspectWeights { weights } => inspect_weights(&weights)?,
         Commands::Forecast {
             data_dir,
             weights,
@@ -128,6 +134,36 @@ fn inspect_geometry() -> Result<()> {
     println!("Total nodes: {TOTAL_NODE_COUNT}");
     println!("ERA5 geometry len: {}", era5.len());
     println!("H3 geometry len: {}", h3.len());
+    Ok(())
+}
+
+fn inspect_weights(weights: &PathBuf) -> Result<()> {
+    info!(path = %weights.display(), "inspecting weights");
+    let report = KeislerGnn::inspect_safetensors(weights, &Config::from_data_dir(".").model)?;
+    println!("Weights: {}", weights.display());
+    println!("Available keys: {}", report.available_keys.len());
+    println!("Required coverage: {}", report.required_coverage());
+    println!("Matched required: {}", report.matched_required.len());
+    println!("Matched optional: {}", report.matched_optional.len());
+
+    if !report.missing_required.is_empty() {
+        println!("Missing required:");
+        for key in &report.missing_required {
+            println!("  - {key}");
+        }
+    }
+    if !report.missing_optional.is_empty() {
+        println!("Missing optional:");
+        for key in &report.missing_optional {
+            println!("  - {key}");
+        }
+    }
+    if !report.unused_keys.is_empty() {
+        println!("Unused keys:");
+        for key in &report.unused_keys {
+            println!("  - {key}");
+        }
+    }
     Ok(())
 }
 

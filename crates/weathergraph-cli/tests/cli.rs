@@ -5,6 +5,7 @@ use std::process::Command;
 use flate2::{Compression, write::GzEncoder};
 use ndarray::{Array1, Array2};
 use ndarray_npy::NpzWriter;
+use safetensors::{Dtype, SafeTensors, tensor::TensorView, tensor::serialize_to_file};
 use tempfile::tempdir;
 
 fn write_npz_gz(
@@ -137,6 +138,47 @@ fn build_fixture_dir() -> tempfile::TempDir {
     temp_dir
 }
 
+fn write_safetensors_fixture(path: &std::path::Path) {
+    let layer0_weight = encode_f32s(&[0.0_f32, 1.0, 1.0, 0.0]);
+    let layer1_weight = encode_f32s(&[1.0_f32, 0.0, 0.0, 1.0]);
+    let scale = encode_f32s(&[1.0_f32, 1.0]);
+    let offset = encode_f32s(&[0.0_f32, 0.0]);
+    let unused = encode_f32s(&[42.0_f32]);
+
+    let tensors = vec![
+        (
+            "encoder_edge_mlp.layers.0.w".to_owned(),
+            TensorView::new(Dtype::F32, vec![2, 2], &layer0_weight).expect("layer0"),
+        ),
+        (
+            "encoder_edge_mlp.layers.1.w".to_owned(),
+            TensorView::new(Dtype::F32, vec![2, 2], &layer1_weight).expect("layer1"),
+        ),
+        (
+            "encoder_edge_mlp.layer_norm.scale".to_owned(),
+            TensorView::new(Dtype::F32, vec![2], &scale).expect("scale"),
+        ),
+        (
+            "encoder_edge_mlp.layer_norm.offset".to_owned(),
+            TensorView::new(Dtype::F32, vec![2], &offset).expect("offset"),
+        ),
+        (
+            "unused.tensor".to_owned(),
+            TensorView::new(Dtype::F32, vec![1], &unused).expect("unused"),
+        ),
+    ];
+    serialize_to_file(tensors, None, path).expect("write safetensors");
+    let bytes = std::fs::read(path).expect("read safetensors");
+    SafeTensors::deserialize(&bytes).expect("validate safetensors");
+}
+
+fn encode_f32s(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<_>>()
+}
+
 #[test]
 fn inspect_artifacts_lists_fixture_shapes() {
     let fixture_dir = build_fixture_dir();
@@ -167,6 +209,30 @@ fn inspect_geometry_reports_expected_counts() {
     assert!(stdout.contains("ERA5 nodes: 65160"));
     assert!(stdout.contains("H3 nodes: 5882"));
     assert!(stdout.contains("Total nodes: 71042"));
+}
+
+#[test]
+fn inspect_weights_reports_missing_and_unused_keys() {
+    let fixture_dir = build_fixture_dir();
+    let weights_path = fixture_dir.path().join("weights.safetensors");
+    write_safetensors_fixture(&weights_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
+        .args([
+            "inspect-weights",
+            "--weights",
+            weights_path.to_str().expect("weights path"),
+        ])
+        .output()
+        .expect("run inspect-weights");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    assert!(stdout.contains("Required coverage:"));
+    assert!(stdout.contains("Missing required:"));
+    assert!(stdout.contains("encoder_node_mlp.layers.0.weight"));
+    assert!(stdout.contains("Unused keys:"));
+    assert!(stdout.contains("unused.tensor"));
 }
 
 #[test]

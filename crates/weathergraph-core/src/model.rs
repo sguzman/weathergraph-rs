@@ -143,6 +143,32 @@ pub struct KeislerGnn {
     pub n_processor_blocks: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightMatch {
+    pub canonical_key: String,
+    pub matched_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightInspectionReport {
+    pub available_keys: Vec<String>,
+    pub matched_required: Vec<WeightMatch>,
+    pub matched_optional: Vec<WeightMatch>,
+    pub missing_required: Vec<String>,
+    pub missing_optional: Vec<String>,
+    pub unused_keys: Vec<String>,
+}
+
+impl WeightInspectionReport {
+    pub fn required_coverage(&self) -> String {
+        format!(
+            "{}/{}",
+            self.matched_required.len(),
+            self.matched_required.len() + self.missing_required.len()
+        )
+    }
+}
+
 impl KeislerGnn {
     pub fn placeholder(config: &ModelConfig, device: &Device) -> Result<Self> {
         let hidden = config.hidden_dim;
@@ -200,6 +226,22 @@ impl KeislerGnn {
             .collect::<Result<HashMap<_, _>>>()?;
 
         Self::from_weight_map(&map, config, device)
+    }
+
+    pub fn inspect_safetensors(
+        path: impl AsRef<Path>,
+        config: &ModelConfig,
+    ) -> Result<WeightInspectionReport> {
+        let bytes = std::fs::read(path)?;
+        let tensors = SafeTensors::deserialize(&bytes)?;
+        let tensor_names = tensors.names();
+        Ok(inspect_weight_keys(
+            &tensor_names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>(),
+            config,
+        ))
     }
 
     pub fn from_weight_map(
@@ -419,6 +461,163 @@ impl KeislerGnn {
         let decoder_hidden = self.decoder_node_mlp.forward(&decoder_node_input)?;
         self.output_projection.forward(&decoder_hidden)
     }
+}
+
+fn inspect_weight_keys(keys: &[String], config: &ModelConfig) -> WeightInspectionReport {
+    let mut available_keys = keys.to_vec();
+    available_keys.sort_unstable();
+
+    let mut matched_required = Vec::new();
+    let mut matched_optional = Vec::new();
+    let mut missing_required = Vec::new();
+    let mut missing_optional = Vec::new();
+
+    for expected in expected_weight_entries(config) {
+        if let Some(matched_key) = expected
+            .candidate_keys
+            .iter()
+            .find(|candidate| available_keys.contains(candidate))
+        {
+            let matched = WeightMatch {
+                canonical_key: expected.canonical_key,
+                matched_key: matched_key.clone(),
+            };
+            if expected.required {
+                matched_required.push(matched);
+            } else {
+                matched_optional.push(matched);
+            }
+        } else if expected.required {
+            missing_required.push(expected.canonical_key);
+        } else {
+            missing_optional.push(expected.canonical_key);
+        }
+    }
+
+    let used_keys = matched_required
+        .iter()
+        .chain(&matched_optional)
+        .map(|entry| entry.matched_key.clone())
+        .collect::<Vec<_>>();
+    let unused_keys = available_keys
+        .iter()
+        .filter(|key| !used_keys.contains(*key))
+        .cloned()
+        .collect();
+
+    WeightInspectionReport {
+        available_keys,
+        matched_required,
+        matched_optional,
+        missing_required,
+        missing_optional,
+        unused_keys,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExpectedWeightEntry {
+    canonical_key: String,
+    candidate_keys: Vec<String>,
+    required: bool,
+}
+
+fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
+    let mut entries = Vec::new();
+    entries.extend(expected_linear_entries("input_projection", false));
+    entries.extend(expected_linear_entries("output_projection", false));
+
+    for prefix in [
+        "encoder_edge_mlp",
+        "encoder_node_mlp",
+        "processor_edge_mlp",
+        "processor_node_mlp",
+        "decoder_edge_mlp",
+    ] {
+        entries.extend(expected_mlp_entries(
+            prefix,
+            config.use_layer_norm,
+            true,
+            &[prefix],
+        ));
+    }
+    entries.extend(expected_mlp_entries(
+        "decoder_node_mlp",
+        false,
+        true,
+        &["decoder_node_mlp"],
+    ));
+    entries.extend(expected_mlp_entries(
+        "processor_edge_init_mlp",
+        true,
+        false,
+        &[
+            "processor_edge_init_mlp",
+            "processor_edge_mlp_init",
+            "net_edges",
+        ],
+    ));
+    entries
+}
+
+fn expected_linear_entries(prefix: &str, required: bool) -> Vec<ExpectedWeightEntry> {
+    vec![
+        ExpectedWeightEntry {
+            canonical_key: format!("{prefix}.weight"),
+            candidate_keys: vec![format!("{prefix}.weight"), format!("{prefix}.w")],
+            required,
+        },
+        ExpectedWeightEntry {
+            canonical_key: format!("{prefix}.bias"),
+            candidate_keys: vec![format!("{prefix}.bias"), format!("{prefix}.b")],
+            required: false,
+        },
+    ]
+}
+
+fn expected_mlp_entries(
+    canonical_prefix: &str,
+    with_layer_norm: bool,
+    required: bool,
+    prefixes: &[&str],
+) -> Vec<ExpectedWeightEntry> {
+    let mut entries = vec![
+        ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layers.0.weight"),
+            candidate_keys: candidate_param_keys(prefixes, "layers.0", "weight"),
+            required,
+        },
+        ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layers.0.bias"),
+            candidate_keys: candidate_param_keys(prefixes, "layers.0", "bias"),
+            required: false,
+        },
+        ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layers.1.weight"),
+            candidate_keys: candidate_param_keys(prefixes, "layers.1", "weight"),
+            required,
+        },
+        ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layers.1.bias"),
+            candidate_keys: candidate_param_keys(prefixes, "layers.1", "bias"),
+            required: false,
+        },
+    ];
+
+    if with_layer_norm {
+        entries.push(ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layer_norm.weight"),
+            candidate_keys: candidate_layer_norm_keys(prefixes, "weight"),
+            required,
+        });
+        entries.push(ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layer_norm.bias"),
+            candidate_keys: candidate_layer_norm_keys(prefixes, "bias"),
+            required,
+        });
+    }
+
+    entries
 }
 
 fn concat_tensors(tensors: &[&Tensor]) -> Result<Tensor> {
@@ -763,7 +962,10 @@ mod tests {
 
     use candle_core::{Device, Tensor};
 
-    use super::{KeislerGnn, Mlp, layer_norm_identity, linear_identity};
+    use super::{
+        KeislerGnn, Mlp, WeightInspectionReport, inspect_weight_keys, layer_norm_identity,
+        linear_identity,
+    };
     use crate::config::ModelConfig;
 
     #[test]
@@ -935,5 +1137,42 @@ mod tests {
         let input = Tensor::from_vec(vec![1.0_f32, 2.0], (1, 2), &device).expect("input");
         let output = model.one_step(&input).expect("one step");
         assert_eq!(output.dims2().expect("dims"), (1, 2));
+    }
+
+    #[test]
+    fn inspect_weights_reports_alias_hits_and_missing_keys() {
+        let config = ModelConfig {
+            input_channels: 2,
+            output_channels: 2,
+            hidden_dim: 2,
+            processor_blocks: 1,
+            use_layer_norm: true,
+        };
+        let report: WeightInspectionReport = inspect_weight_keys(
+            &[
+                "encoder_edge_mlp.layers.0.w".to_owned(),
+                "encoder_edge_mlp.layers.1.w".to_owned(),
+                "encoder_edge_mlp.layer_norm.scale".to_owned(),
+                "encoder_edge_mlp.layer_norm.offset".to_owned(),
+                "unused.tensor".to_owned(),
+            ],
+            &config,
+        );
+
+        assert!(
+            report
+                .matched_required
+                .iter()
+                .any(
+                    |entry| entry.canonical_key == "encoder_edge_mlp.layers.0.weight"
+                        && entry.matched_key == "encoder_edge_mlp.layers.0.w"
+                )
+        );
+        assert!(
+            report
+                .missing_required
+                .contains(&"encoder_node_mlp.layers.0.weight".to_owned())
+        );
+        assert!(report.unused_keys.contains(&"unused.tensor".to_owned()));
     }
 }

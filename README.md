@@ -15,7 +15,7 @@ This project ports the inference path of [`rkeisler/keisler-2022`](https://githu
 | Graph aggregation kernel | Implemented | CPU-first gather and scatter-add aggregation with tests. |
 | MLP and LayerNorm parity | Implemented | Explicit Rust/Candle tensor modules with fake-weight tests. |
 | One-step scaffold | Implemented | Runner, model loading boundary, solar features, and one-step path. |
-| CLI and logging | Implemented | `inspect-artifacts`, `inspect-geometry`, and `forecast` command wiring. |
+| CLI and logging | Implemented | `inspect-artifacts`, `inspect-geometry`, `inspect-weights`, and `forecast` command wiring. |
 | Python/Rust numeric parity | Scaffolded | Fixture contract and weight-export boundary are documented. |
 | Autoregressive rollout / NetCDF output | Deferred | Reserved for the next milestone. |
 
@@ -108,6 +108,13 @@ Inspect geometry parity:
 cargo run -p weathergraph-cli -- inspect-geometry
 ```
 
+Inspect an exported checkpoint before trying parity or forecast:
+
+```bash
+cargo run -p weathergraph-cli -- inspect-weights \
+  --weights /path/to/weights.safetensors
+```
+
 Validate a forecast request and runner wiring:
 
 ```bash
@@ -148,7 +155,8 @@ The codebase includes:
 - unit tests for ERA5/H3 geometry counts
 - unit tests for gather/scatter tensor kernels
 - unit tests for MLP and GNN shape behavior
-- CLI integration tests for `inspect-artifacts`, `inspect-geometry`, and forecast validation
+- unit tests for weight-key inspection and alias matching
+- CLI integration tests for `inspect-artifacts`, `inspect-geometry`, `inspect-weights`, and forecast validation
 
 Parity against real upstream tensors is intentionally gated behind external fixtures and exported weights.
 

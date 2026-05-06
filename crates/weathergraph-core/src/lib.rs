@@ -13,6 +13,6 @@ pub use config::{Config, DataConfig, ForecastInputKind, ForecastRequest, ModelCo
 pub use error::{Result, WeatherGraphError};
 pub use geometry::Geometry;
 pub use graph::{GraphSet, StaticGraph};
-pub use model::{KeislerGnn, Mlp};
+pub use model::{KeislerGnn, Mlp, WeightInspectionReport, WeightMatch};
 pub use normalizer::Normalizer;
 pub use runner::Runner;
