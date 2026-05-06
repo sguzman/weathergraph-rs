@@ -4,6 +4,6 @@
 *.npz.gz
 *.pkl
 *.safetensors
+*.pyc
+__pycache__/
 /.idea
-tools/__pycache__
-tools/tests/__pycache__
