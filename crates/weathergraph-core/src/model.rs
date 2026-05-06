@@ -129,12 +129,14 @@ impl Mlp {
 
 #[derive(Debug, Clone)]
 pub struct KeislerGnn {
+    pub input_projection: LinearLayer,
     pub encoder_edge_mlp: Mlp,
     pub encoder_node_mlp: Mlp,
     pub processor_edge_mlp: Mlp,
     pub processor_node_mlp: Mlp,
     pub decoder_edge_mlp: Mlp,
     pub decoder_node_mlp: Mlp,
+    pub output_projection: LinearLayer,
     pub n_processor_blocks: usize,
 }
 
@@ -153,12 +155,14 @@ impl KeislerGnn {
         };
 
         Ok(Self {
+            input_projection: linear_identity(config.input_channels, hidden, device)?,
             encoder_edge_mlp: mlp.clone(),
             encoder_node_mlp: mlp.clone(),
             processor_edge_mlp: mlp.clone(),
             processor_node_mlp: mlp.clone(),
             decoder_edge_mlp: mlp.clone(),
             decoder_node_mlp: mlp,
+            output_projection: linear_identity(hidden, config.output_channels, device)?,
             n_processor_blocks: config.processor_blocks,
         })
     }
@@ -193,18 +197,33 @@ impl KeislerGnn {
         device: &Device,
     ) -> Result<Self> {
         Ok(Self {
+            input_projection: load_linear_or_identity(
+                "input_projection",
+                tensors,
+                config.input_channels,
+                config.hidden_dim,
+                device,
+            )?,
             encoder_edge_mlp: load_mlp("encoder_edge_mlp", tensors, config, device)?,
             encoder_node_mlp: load_mlp("encoder_node_mlp", tensors, config, device)?,
             processor_edge_mlp: load_mlp("processor_edge_mlp", tensors, config, device)?,
             processor_node_mlp: load_mlp("processor_node_mlp", tensors, config, device)?,
             decoder_edge_mlp: load_mlp("decoder_edge_mlp", tensors, config, device)?,
             decoder_node_mlp: load_mlp("decoder_node_mlp", tensors, config, device)?,
+            output_projection: load_linear_or_identity(
+                "output_projection",
+                tensors,
+                config.hidden_dim,
+                config.output_channels,
+                device,
+            )?,
             n_processor_blocks: config.processor_blocks,
         })
     }
 
     pub fn one_step(&self, state: &Tensor) -> Result<Tensor> {
-        let mut current = self.encoder_node_mlp.forward(state)?;
+        let mut current = self.input_projection.forward(state)?;
+        current = self.encoder_node_mlp.forward(&current)?;
         current = self.encoder_edge_mlp.forward(&current)?;
 
         for _ in 0..self.n_processor_blocks {
@@ -213,7 +232,8 @@ impl KeislerGnn {
         }
 
         current = self.decoder_edge_mlp.forward(&current)?;
-        self.decoder_node_mlp.forward(&current)
+        current = self.decoder_node_mlp.forward(&current)?;
+        self.output_projection.forward(&current)
     }
 }
 
@@ -302,6 +322,29 @@ fn load_mlp(
     Ok(Mlp { layers, layer_norm })
 }
 
+fn load_linear_or_identity(
+    prefix: &str,
+    tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+    input_dim: usize,
+    output_dim: usize,
+    device: &Device,
+) -> Result<LinearLayer> {
+    let weight_key = format!("{prefix}.weight");
+    let bias_key = format!("{prefix}.bias");
+    if let Some((shape, values)) = tensors.get(&weight_key) {
+        let weight = Tensor::from_vec(values.clone(), shape.as_slice(), device)?;
+        let bias = tensors
+            .get(&bias_key)
+            .map(|(bias_shape, bias_values)| {
+                Tensor::from_vec(bias_values.clone(), bias_shape.as_slice(), device)
+            })
+            .transpose()?;
+        return Ok(LinearLayer { weight, bias });
+    }
+
+    linear_identity(input_dim, output_dim, device)
+}
+
 fn load_tensor(
     tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
     key: &str,
@@ -344,6 +387,8 @@ mod tests {
     fn gnn_placeholder_runs_one_step() {
         let device = Device::Cpu;
         let config = ModelConfig {
+            input_channels: 2,
+            output_channels: 2,
             hidden_dim: 2,
             processor_blocks: 2,
             use_layer_norm: true,
@@ -358,11 +403,29 @@ mod tests {
     fn gnn_loads_fake_weight_map() {
         let device = Device::Cpu;
         let config = ModelConfig {
+            input_channels: 2,
+            output_channels: 2,
             hidden_dim: 2,
             processor_blocks: 1,
             use_layer_norm: true,
         };
         let mut tensors = HashMap::new();
+        tensors.insert(
+            "input_projection.weight".to_owned(),
+            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        tensors.insert(
+            "input_projection.bias".to_owned(),
+            (vec![2], vec![0.0, 0.0]),
+        );
+        tensors.insert(
+            "output_projection.weight".to_owned(),
+            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        tensors.insert(
+            "output_projection.bias".to_owned(),
+            (vec![2], vec![0.0, 0.0]),
+        );
         for prefix in [
             "encoder_edge_mlp",
             "encoder_node_mlp",

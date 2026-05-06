@@ -84,6 +84,8 @@ impl ArtifactPaths {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelConfig {
+    pub input_channels: usize,
+    pub output_channels: usize,
     pub hidden_dim: usize,
     pub processor_blocks: usize,
     pub use_layer_norm: bool,
@@ -92,6 +94,8 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
+            input_channels: 78,
+            output_channels: 78,
             hidden_dim: 256,
             processor_blocks: 9,
             use_layer_norm: true,

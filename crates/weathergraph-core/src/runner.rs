@@ -56,10 +56,15 @@ impl Runner {
         request: &ForecastRequest,
     ) -> Result<Tensor> {
         let (n_nodes, feature_dim) = state.dims2()?;
-        if feature_dim != self.config.model.hidden_dim {
+        let expected_channels = self
+            .normalizer
+            .means
+            .len()
+            .max(self.config.model.input_channels);
+        if feature_dim != expected_channels {
             return Err(WeatherGraphError::ShapeMismatch {
                 name: "runner state".to_owned(),
-                expected: self.config.model.hidden_dim.to_string(),
+                expected: expected_channels.to_string(),
                 actual: feature_dim.to_string(),
             });
         }
@@ -77,19 +82,23 @@ impl Runner {
 
     pub fn run_forecast(&self, request: &ForecastRequest) -> Result<()> {
         self.validate_request(request)?;
-        let hidden_dim = self.config.model.hidden_dim;
+        let input_channels = self
+            .normalizer
+            .means
+            .len()
+            .max(self.config.model.input_channels);
         let _surface = self
             .normalizer
             .encoder_surface_features(self.graphs.n_total_nodes);
         let initial_state = Tensor::zeros(
-            (self.graphs.n_total_nodes, hidden_dim),
+            (self.graphs.n_total_nodes, input_channels),
             candle_core::DType::F32,
             &self.device,
         )?;
         let _ = self.one_step(&initial_state, 0, request)?;
         Err(WeatherGraphError::NotYetImplemented(format!(
             "autoregressive rollout and NetCDF output are deferred; one-step scaffold validated for state shape {}",
-            shape_string(&[self.graphs.n_total_nodes, hidden_dim])
+            shape_string(&[self.graphs.n_total_nodes, input_channels])
         )))
     }
 }
