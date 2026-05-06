@@ -150,6 +150,13 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 ```
 
+Exercise the Python exporter helpers:
+
+```bash
+python3 -m py_compile tools/export_weights.py tools/export_parity_fixture.py
+python3 -m unittest discover -s tools/tests
+```
+
 ## Testing
 
 The codebase includes:
