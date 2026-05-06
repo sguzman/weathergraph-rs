@@ -20,8 +20,8 @@ pub struct Runner {
 impl Runner {
     pub fn load(config: Config) -> Result<Self> {
         let device = Device::Cpu;
-        let graphs = GraphSet::load(&config.artifacts.data_dir)?;
-        let normalizer = Normalizer::load(&config.artifacts.data_dir)?;
+        let graphs = GraphSet::load(&config.artifacts.data_dir, &config.data)?;
+        let normalizer = Normalizer::load(&config.artifacts.data_dir, &config.data)?;
         let model = if let Some(weights_file) = &config.artifacts.weights_file {
             KeislerGnn::from_safetensors(weights_file, &config.model, &device)?
         } else {
@@ -78,6 +78,9 @@ impl Runner {
     pub fn run_forecast(&self, request: &ForecastRequest) -> Result<()> {
         self.validate_request(request)?;
         let hidden_dim = self.config.model.hidden_dim;
+        let _surface = self
+            .normalizer
+            .encoder_surface_features(self.graphs.n_total_nodes);
         let initial_state = Tensor::zeros(
             (self.graphs.n_total_nodes, hidden_dim),
             candle_core::DType::F32,

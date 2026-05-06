@@ -9,7 +9,7 @@ pub mod runner;
 pub mod solar;
 pub mod tensor;
 
-pub use config::{Config, ForecastInputKind, ForecastRequest, ModelConfig};
+pub use config::{Config, DataConfig, ForecastInputKind, ForecastRequest, ModelConfig};
 pub use error::{Result, WeatherGraphError};
 pub use geometry::Geometry;
 pub use graph::{GraphSet, StaticGraph};

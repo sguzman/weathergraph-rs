@@ -95,10 +95,12 @@ pub struct NamedArray {
 }
 
 impl NamedArray {
+    #[must_use]
     pub fn shape(&self) -> Vec<usize> {
         self.data.shape()
     }
 
+    #[must_use]
     pub fn stem(&self) -> &str {
         self.name.trim_end_matches(".npy")
     }
@@ -155,6 +157,33 @@ impl FeatureBundle {
 
     pub fn first_array(&self) -> Option<&NamedArray> {
         self.arrays.first()
+    }
+
+    pub fn get(&self, candidate: &str) -> Result<&NamedArray> {
+        self.arrays
+            .iter()
+            .find(|entry| entry.stem().eq_ignore_ascii_case(candidate))
+            .ok_or_else(|| WeatherGraphError::MissingArtifact {
+                name: candidate.to_owned(),
+                path: self.source.clone(),
+            })
+    }
+
+    pub fn get_any<'a>(&'a self, candidates: &[&str]) -> Result<&'a NamedArray> {
+        for candidate in candidates {
+            if let Ok(entry) = self.get(candidate) {
+                return Ok(entry);
+            }
+        }
+
+        Err(WeatherGraphError::MissingArtifact {
+            name: candidates.join("/"),
+            path: self.source.clone(),
+        })
+    }
+
+    pub fn get_f32(&self, candidates: &[&str]) -> Result<ArrayD<f32>> {
+        self.get_any(candidates)?.data.as_f32(&candidates.join("/"))
     }
 }
 

@@ -60,21 +60,38 @@ fn build_fixture_dir() -> tempfile::TempDir {
     );
 
     for name in [
-        "node_features_encoder.npz.gz",
-        "node_features_processor.npz.gz",
-        "node_features_decoder.npz.gz",
-        "edge_features_encoder.npz.gz",
-        "edge_features_processor.npz.gz",
-        "edge_features_decoder.npz.gz",
-        "temporal_normalizer.npz.gz",
-        "orography_landsea.npz.gz",
+        "node_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
+        "node_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz",
+        "node_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
+        "edge_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
+        "edge_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz",
+        "edge_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
     ] {
         write_npz_gz(
             &data_dir.join(name),
-            vec![("values", Array2::<f32>::zeros((2, 2)))],
+            vec![("local_coords", Array2::<f32>::zeros((2, 2)))],
             None,
         );
     }
+
+    write_npz_gz(
+        &data_dir.join(
+            "temporal_normalizer_rk-era5-data_zarr-era5_1979begin_2020end_03hr_6phys_181lat_360lon_13levels_blosc1comp_Corder_monolith.npz.gz",
+        ),
+        vec![
+            ("means", Array2::<f32>::zeros((1, 2))),
+            ("stds", Array2::<f32>::ones((1, 2))),
+        ],
+        None,
+    );
+    write_npz_gz(
+        &data_dir.join("orography_landsea.npz.gz"),
+        vec![
+            ("orography", Array2::<f32>::zeros((181, 360))),
+            ("landsea", Array2::<f32>::ones((181, 360))),
+        ],
+        None,
+    );
 
     temp_dir
 }

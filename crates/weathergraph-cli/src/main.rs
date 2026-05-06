@@ -11,6 +11,7 @@ use weathergraph_core::geometry::{
     ERA5_NODE_COUNT, H3_NODE_COUNT, TOTAL_NODE_COUNT, build_era5_geometry, build_h3_geometry,
     verify_geometry_counts,
 };
+use weathergraph_core::graph::GraphSet;
 use weathergraph_core::runner::Runner;
 
 #[derive(Debug, Parser)]
@@ -102,6 +103,19 @@ fn inspect_artifacts(data_dir: &PathBuf) -> Result<()> {
             println!("  - {}: {} {:?}", array.name, array.dtype, array.shape);
         }
     }
+    let graph_set = GraphSet::load(data_dir, &Config::from_data_dir(data_dir).data)?;
+    println!(
+        "encoder node feature keys: {:?}",
+        graph_set.encoder.node_feature_keys
+    );
+    println!(
+        "processor node feature keys: {:?}",
+        graph_set.processor.node_feature_keys
+    );
+    println!(
+        "decoder node feature keys: {:?}",
+        graph_set.decoder.node_feature_keys
+    );
     Ok(())
 }
 

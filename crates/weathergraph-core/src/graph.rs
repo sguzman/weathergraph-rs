@@ -1,8 +1,8 @@
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use crate::config::DataConfig;
 use crate::error::{Result, WeatherGraphError};
-use crate::features::{FeatureBundle, find_artifact_path};
+use crate::features::FeatureBundle;
 use crate::geometry::{ERA5_NODE_COUNT, H3_NODE_COUNT, TOTAL_NODE_COUNT};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +14,8 @@ pub struct StaticGraph {
     pub receivers: Vec<u32>,
     pub node_features: FeatureBundle,
     pub edge_features: FeatureBundle,
+    pub node_feature_keys: Vec<String>,
+    pub edge_feature_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,11 +29,11 @@ pub struct GraphSet {
 }
 
 impl GraphSet {
-    pub fn load(data_dir: impl AsRef<Path>) -> Result<Self> {
+    pub fn load(data_dir: impl AsRef<Path>, data: &DataConfig) -> Result<Self> {
         let data_dir = data_dir.as_ref();
-        let encoder = load_graph(data_dir, GraphKind::Encoder, TOTAL_NODE_COUNT)?;
-        let processor = load_graph(data_dir, GraphKind::Processor, H3_NODE_COUNT)?;
-        let decoder = load_graph(data_dir, GraphKind::Decoder, TOTAL_NODE_COUNT)?;
+        let encoder = load_graph(data_dir, GraphKind::Encoder, TOTAL_NODE_COUNT, data)?;
+        let processor = load_graph(data_dir, GraphKind::Processor, H3_NODE_COUNT, data)?;
+        let decoder = load_graph(data_dir, GraphKind::Decoder, TOTAL_NODE_COUNT, data)?;
 
         Ok(Self {
             encoder,
@@ -61,11 +63,17 @@ impl GraphKind {
     }
 }
 
-fn load_graph(data_dir: &Path, kind: GraphKind, n_nodes: usize) -> Result<StaticGraph> {
-    let senders_receivers_path = find_artifact_path(
-        data_dir,
-        &[&format!("senders_receivers_{}.npz.gz", kind.as_str())],
-    )?;
+fn load_graph(
+    data_dir: &Path,
+    kind: GraphKind,
+    n_nodes: usize,
+    data: &DataConfig,
+) -> Result<StaticGraph> {
+    let senders_receivers_path = data_dir.join(match kind {
+        GraphKind::Encoder => &data.senders_receivers_encoder,
+        GraphKind::Processor => &data.senders_receivers_processor,
+        GraphKind::Decoder => &data.senders_receivers_decoder,
+    });
     let senders_receivers = FeatureBundle::load(&senders_receivers_path)?;
 
     let senders = select_named_array(&senders_receivers, &["senders"])?
@@ -83,10 +91,27 @@ fn load_graph(data_dir: &Path, kind: GraphKind, n_nodes: usize) -> Result<Static
         });
     }
 
-    let node_features =
-        FeatureBundle::load(resolve_feature_file(data_dir, kind, "node_features")?)?;
-    let edge_features =
-        FeatureBundle::load(resolve_feature_file(data_dir, kind, "edge_features")?)?;
+    let node_features = FeatureBundle::load(data_dir.join(match kind {
+        GraphKind::Encoder => &data.node_features_e,
+        GraphKind::Processor => &data.node_features_p,
+        GraphKind::Decoder => &data.node_features_d,
+    }))?;
+    let edge_features = FeatureBundle::load(data_dir.join(match kind {
+        GraphKind::Encoder => &data.edge_features_e,
+        GraphKind::Processor => &data.edge_features_p,
+        GraphKind::Decoder => &data.edge_features_d,
+    }))?;
+    let node_feature_keys = node_features
+        .arrays
+        .iter()
+        .map(|entry| entry.stem().to_owned())
+        .filter(|name| name != "local_coords")
+        .collect::<Vec<_>>();
+    let edge_feature_keys = edge_features
+        .arrays
+        .iter()
+        .map(|entry| entry.stem().to_owned())
+        .collect::<Vec<_>>();
 
     Ok(StaticGraph {
         name: kind.as_str().to_owned(),
@@ -96,61 +121,8 @@ fn load_graph(data_dir: &Path, kind: GraphKind, n_nodes: usize) -> Result<Static
         receivers,
         node_features,
         edge_features,
-    })
-}
-
-fn resolve_feature_file(data_dir: &Path, kind: GraphKind, prefix: &str) -> Result<PathBuf> {
-    let preferred = data_dir.join(format!("{prefix}_{}.npz.gz", kind.as_str()));
-    if preferred.exists() {
-        return Ok(preferred);
-    }
-
-    let mut matches = fs::read_dir(data_dir)?
-        .map(|entry| entry.map(|value| value.path()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    matches.retain(|path| {
-        path.file_name().is_some_and(|name| {
-            let name = name.to_string_lossy();
-            name.starts_with(prefix) && name.ends_with(".npz.gz")
-        })
-    });
-    matches.sort();
-
-    match kind {
-        GraphKind::Processor => matches
-            .iter()
-            .find(|path| path.to_string_lossy().contains("processor"))
-            .or_else(|| {
-                matches
-                    .iter()
-                    .find(|path| path.to_string_lossy().contains("n5882"))
-            })
-            .cloned(),
-        GraphKind::Encoder => {
-            let mut total_matches = matches
-                .iter()
-                .filter(|path| !path.to_string_lossy().contains("processor"))
-                .cloned()
-                .collect::<Vec<_>>();
-            total_matches.sort();
-            total_matches.first().cloned()
-        }
-        GraphKind::Decoder => {
-            let mut total_matches = matches
-                .iter()
-                .filter(|path| !path.to_string_lossy().contains("processor"))
-                .cloned()
-                .collect::<Vec<_>>();
-            total_matches.sort();
-            total_matches
-                .get(1)
-                .cloned()
-                .or_else(|| total_matches.first().cloned())
-        }
-    }
-    .ok_or_else(|| WeatherGraphError::MissingArtifact {
-        name: format!("{prefix}_{}", kind.as_str()),
-        path: data_dir.to_path_buf(),
+        node_feature_keys,
+        edge_feature_keys,
     })
 }
 

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Export upstream Haiku weights to safetensors for weathergraph-rs.
-
-This tool is intentionally conservative: it defines the expected export contract
-and validates the source pickle path, but leaves exact upstream tree walking to
-the parity milestone where the original weight file is available locally.
-"""
+"""Export upstream Haiku weights to safetensors for weathergraph-rs."""
 
 from __future__ import annotations
 
@@ -12,7 +7,11 @@ import argparse
 import pathlib
 import pickle
 import sys
+from collections.abc import Mapping
 from typing import Any
+
+import numpy as np
+from safetensors.numpy import save_file
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,17 +36,61 @@ def main() -> int:
     with source.open("rb") as handle:
         payload: Any = pickle.load(handle)
 
-    print("Loaded upstream pickle successfully.", file=sys.stderr)
-    print(f"Top-level payload type: {type(payload)!r}", file=sys.stderr)
-    print(f"Requested output path: {out}", file=sys.stderr)
-    print(
-        "Exact Haiku->safetensors flattening is deferred to the numeric parity milestone. "
-        "See artifacts/README.md for the expected tensor naming contract.",
-        file=sys.stderr,
-    )
+    flat = flatten_params(payload)
+    if not flat:
+        raise ValueError("no tensor-like arrays were found in the source pickle")
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    save_file(flat, str(out))
+    print(f"Loaded upstream pickle type: {type(payload)!r}", file=sys.stderr)
+    print(f"Exported {len(flat)} tensors to {out}", file=sys.stderr)
     return 0
+
+
+def flatten_params(payload: Any) -> dict[str, np.ndarray]:
+    flat: dict[str, np.ndarray] = {}
+
+    def visit(node: Any, path: tuple[str, ...]) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                visit(value, path + (sanitize_key(key),))
+            return
+        if isinstance(node, (list, tuple)):
+            for index, value in enumerate(node):
+                visit(value, path + (str(index),))
+            return
+
+        array = maybe_array(node)
+        if array is None:
+            return
+        if not path:
+            raise ValueError("encountered tensor-like value without a stable key path")
+        flat[".".join(path)] = array
+
+    visit(payload, ())
+    return flat
+
+
+def maybe_array(node: Any) -> np.ndarray | None:
+    if hasattr(node, "shape") and hasattr(node, "dtype"):
+        array = np.asarray(node)
+    elif isinstance(node, (int, float, bool)):
+        array = np.asarray(node)
+    else:
+        return None
+
+    if array.dtype == np.dtype("O"):
+        return None
+    if array.dtype.kind == "f":
+        return np.asarray(array, dtype=np.float32)
+    return np.asarray(array)
+
+
+def sanitize_key(key: Any) -> str:
+    if isinstance(key, tuple):
+        return ".".join(sanitize_key(part) for part in key)
+    return str(key).replace("/", ".")
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
