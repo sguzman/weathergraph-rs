@@ -134,6 +134,7 @@ pub struct KeislerGnn {
     pub input_projection: LinearLayer,
     pub encoder_edge_mlp: Mlp,
     pub encoder_node_mlp: Mlp,
+    pub processor_edge_init_mlp: Mlp,
     pub processor_edge_mlp: Mlp,
     pub processor_node_mlp: Mlp,
     pub decoder_edge_mlp: Mlp,
@@ -145,7 +146,7 @@ pub struct KeislerGnn {
 impl KeislerGnn {
     pub fn placeholder(config: &ModelConfig, device: &Device) -> Result<Self> {
         let hidden = config.hidden_dim;
-        let mlp = Mlp {
+        let hidden_mlp = Mlp {
             layers: vec![
                 linear_identity(hidden, hidden, device)?,
                 linear_identity(hidden, hidden, device)?,
@@ -155,15 +156,23 @@ impl KeislerGnn {
                 .then(|| layer_norm_identity(hidden, device))
                 .transpose()?,
         };
+        let decoder_node_mlp = Mlp {
+            layers: vec![
+                linear_identity(hidden, hidden, device)?,
+                linear_identity(hidden, hidden, device)?,
+            ],
+            layer_norm: None,
+        };
 
         Ok(Self {
             input_projection: linear_identity(config.input_channels, hidden, device)?,
-            encoder_edge_mlp: mlp.clone(),
-            encoder_node_mlp: mlp.clone(),
-            processor_edge_mlp: mlp.clone(),
-            processor_node_mlp: mlp.clone(),
-            decoder_edge_mlp: mlp.clone(),
-            decoder_node_mlp: mlp,
+            encoder_edge_mlp: hidden_mlp.clone(),
+            encoder_node_mlp: hidden_mlp.clone(),
+            processor_edge_init_mlp: hidden_mlp.clone(),
+            processor_edge_mlp: hidden_mlp.clone(),
+            processor_node_mlp: hidden_mlp.clone(),
+            decoder_edge_mlp: hidden_mlp,
+            decoder_node_mlp,
             output_projection: linear_identity(hidden, config.output_channels, device)?,
             n_processor_blocks: config.processor_blocks,
         })
@@ -198,6 +207,7 @@ impl KeislerGnn {
         config: &ModelConfig,
         device: &Device,
     ) -> Result<Self> {
+        let processor_edge_mlp = load_mlp("processor_edge_mlp", tensors, config, device)?;
         Ok(Self {
             input_projection: load_linear_or_identity(
                 "input_projection",
@@ -208,10 +218,25 @@ impl KeislerGnn {
             )?,
             encoder_edge_mlp: load_mlp("encoder_edge_mlp", tensors, config, device)?,
             encoder_node_mlp: load_mlp("encoder_node_mlp", tensors, config, device)?,
-            processor_edge_mlp: load_mlp("processor_edge_mlp", tensors, config, device)?,
+            processor_edge_init_mlp: load_mlp_optional(
+                "processor_edge_init_mlp",
+                tensors,
+                config.hidden_dim,
+                true,
+                device,
+            )?
+            .unwrap_or_else(|| processor_edge_mlp.clone()),
+            processor_edge_mlp,
             processor_node_mlp: load_mlp("processor_node_mlp", tensors, config, device)?,
             decoder_edge_mlp: load_mlp("decoder_edge_mlp", tensors, config, device)?,
-            decoder_node_mlp: load_mlp("decoder_node_mlp", tensors, config, device)?,
+            decoder_node_mlp: load_mlp_with_dims(
+                "decoder_node_mlp",
+                tensors,
+                config.hidden_dim,
+                config.hidden_dim,
+                false,
+                device,
+            )?,
             output_projection: load_linear_or_identity(
                 "output_projection",
                 tensors,
@@ -227,6 +252,7 @@ impl KeislerGnn {
         let mut current = self.input_projection.forward(state)?;
         current = self.encoder_node_mlp.forward(&current)?;
         current = self.encoder_edge_mlp.forward(&current)?;
+        current = self.processor_edge_init_mlp.forward(&current)?;
 
         for _ in 0..self.n_processor_blocks {
             current = self.processor_node_mlp.forward(&current)?;
@@ -286,7 +312,7 @@ impl KeislerGnn {
         let encoder_hidden = self.encoder_node_mlp.forward(&encoder_node_input)?;
 
         let mut processor_edge_hidden = self
-            .encoder_edge_mlp
+            .processor_edge_init_mlp
             .forward(&graphs.processor.edge_tensors.local_coords_row)?;
         let mut processor_node_hidden =
             slice_rows(&encoder_hidden, graphs.n_era5_nodes, graphs.n_h3_nodes)?;
@@ -512,51 +538,84 @@ fn load_mlp(
     config: &ModelConfig,
     device: &Device,
 ) -> Result<Mlp> {
-    let hidden = config.hidden_dim;
-    let layer_names = ["layers.0", "layers.1"];
-    let mut layers = Vec::with_capacity(layer_names.len());
+    load_mlp_with_dims(
+        prefix,
+        tensors,
+        config.hidden_dim,
+        config.hidden_dim,
+        config.use_layer_norm,
+        device,
+    )
+}
 
-    for layer_name in layer_names {
-        let weight_key = format!("{prefix}.{layer_name}.weight");
-        let bias_key = format!("{prefix}.{layer_name}.bias");
-        let weight = load_tensor(tensors, &weight_key, device)?;
-        let bias = load_tensor(tensors, &bias_key, device).ok();
-        layers.push(LinearLayer { weight, bias });
+fn load_mlp_optional(
+    prefix: &str,
+    tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+    hidden_dim: usize,
+    with_layer_norm: bool,
+    device: &Device,
+) -> Result<Option<Mlp>> {
+    let weight_key = format!("{prefix}.layers.0.weight");
+    if !tensors.contains_key(&weight_key) {
+        return Ok(None);
+    }
+    load_mlp_with_dims(
+        prefix,
+        tensors,
+        hidden_dim,
+        hidden_dim,
+        with_layer_norm,
+        device,
+    )
+    .map(Some)
+}
+
+fn load_mlp_with_dims(
+    prefix: &str,
+    tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+    input_dim: usize,
+    hidden_dim: usize,
+    with_layer_norm: bool,
+    device: &Device,
+) -> Result<Mlp> {
+    let layer0 = LinearLayer {
+        weight: load_tensor(tensors, &format!("{prefix}.layers.0.weight"), device)?,
+        bias: load_tensor(tensors, &format!("{prefix}.layers.0.bias"), device).ok(),
+    };
+    let layer1 = LinearLayer {
+        weight: load_tensor(tensors, &format!("{prefix}.layers.1.weight"), device)?,
+        bias: load_tensor(tensors, &format!("{prefix}.layers.1.bias"), device).ok(),
+    };
+
+    if layer0.weight.dims2()? != (hidden_dim, input_dim) {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: format!("{prefix}.layers.0.weight"),
+            expected: format!("[{hidden_dim}, {input_dim}]"),
+            actual: format!("{:?}", layer0.weight.dims()),
+        });
+    }
+    if layer1.weight.dims2()? != (hidden_dim, hidden_dim) {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: format!("{prefix}.layers.1.weight"),
+            expected: format!("[{hidden_dim}, {hidden_dim}]"),
+            actual: format!("{:?}", layer1.weight.dims()),
+        });
     }
 
-    let layer_norm = if config.use_layer_norm {
-        let weight_key = format!("{prefix}.layer_norm.weight");
-        let bias_key = format!("{prefix}.layer_norm.bias");
+    let layer_norm = if with_layer_norm {
         Some(LayerNorm {
-            weight: load_tensor(tensors, &weight_key, device)?,
-            bias: load_tensor(tensors, &bias_key, device)?,
+            weight: load_tensor(tensors, &format!("{prefix}.layer_norm.weight"), device)?,
+            bias: load_tensor(tensors, &format!("{prefix}.layer_norm.bias"), device)?,
             eps: 1.0e-5_f32,
         })
     } else {
         None
     };
 
-    if layers.is_empty() {
-        return Err(WeatherGraphError::InvalidConfig(format!(
-            "no layers loaded for `{prefix}`"
-        )));
-    }
-
-    if layer_norm.is_none() && config.use_layer_norm {
-        return Err(WeatherGraphError::InvalidConfig(format!(
-            "layer norm missing for `{prefix}`"
-        )));
-    }
-
-    if layers[0].weight.dims2()? != (hidden, hidden) {
-        return Err(WeatherGraphError::ShapeMismatch {
-            name: format!("{prefix}.layers.0.weight"),
-            expected: format!("[{hidden}, {hidden}]"),
-            actual: format!("{:?}", layers[0].weight.dims()),
-        });
-    }
-
-    Ok(Mlp { layers, layer_norm })
+    Ok(Mlp {
+        layers: vec![layer0, layer1],
+        layer_norm,
+    })
 }
 
 fn load_linear_or_identity(
