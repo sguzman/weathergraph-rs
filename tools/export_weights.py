@@ -49,6 +49,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to write raw flattened keys that still need manual mapping after aliasing",
     )
     parser.add_argument(
+        "--emit-mapping-template",
+        help="Optional path to write a JSON mapping skeleton for unresolved raw keys",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Skip writing safetensors and only report remapped/unmapped key coverage",
@@ -93,6 +97,8 @@ def main() -> int:
         save_file(flat_mapped, str(out))
     if args.emit_unmapped:
         emit_unmapped(pathlib.Path(args.emit_unmapped), unmapped)
+    if args.emit_mapping_template:
+        emit_mapping_template(pathlib.Path(args.emit_mapping_template), unmapped)
     print(f"Loaded upstream pickle type: {type(payload)!r}", file=sys.stderr)
     if args.dry_run:
         print(
@@ -244,6 +250,12 @@ def emit_unmapped(path: pathlib.Path, unmapped: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"unmapped_raw_keys": unmapped}
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def emit_mapping_template(path: pathlib.Path, unmapped: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    template = {key: "" for key in unmapped}
+    path.write_text(json.dumps(template, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def maybe_array(node: Any) -> np.ndarray | None:

@@ -6,3 +6,4 @@
 *.safetensors
 /.idea
 tools/__pycache__
+tools/tests/__pycache__

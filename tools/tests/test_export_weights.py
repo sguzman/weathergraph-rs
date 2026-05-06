@@ -99,6 +99,45 @@ class ExportWeightsTests(unittest.TestCase):
             unmapped_payload = json.loads(unmapped.read_text(encoding="utf-8"))
             self.assertEqual(unmapped_payload["unmapped_raw_keys"], ["unmapped_module.w"])
 
+    def test_dry_run_cli_emits_mapping_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            temp_path = pathlib.Path(tmpdir)
+            payload = {
+                ("unmapped_module", "w"): np.ones((1,), dtype=np.float32),
+                ("other_unmapped", "b"): np.zeros((1,), dtype=np.float32),
+            }
+            source = temp_path / "weights.pkl"
+            out = temp_path / "weights.safetensors"
+            mapping_template = temp_path / "mapping-template.json"
+            with source.open("wb") as handle:
+                pickle.dump(payload, handle)
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(MODULE_PATH),
+                    "--source",
+                    str(source),
+                    "--out",
+                    str(out),
+                    "--emit-mapping-template",
+                    str(mapping_template),
+                    "--dry-run",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            template_payload = json.loads(mapping_template.read_text(encoding="utf-8"))
+            self.assertEqual(
+                template_payload,
+                {
+                    "other_unmapped.b": "",
+                    "unmapped_module.w": "",
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
