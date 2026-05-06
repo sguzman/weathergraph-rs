@@ -3,6 +3,7 @@ use std::path::Path;
 
 use candle_core::{Device, Tensor};
 use safetensors::{Dtype, SafeTensors};
+use serde::Serialize;
 
 use crate::config::ModelConfig;
 use crate::error::{Result, WeatherGraphError};
@@ -143,13 +144,13 @@ pub struct KeislerGnn {
     pub n_processor_blocks: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WeightMatch {
     pub canonical_key: String,
     pub matched_key: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WeightInspectionReport {
     pub available_keys: Vec<String>,
     pub matched_required: Vec<WeightMatch>,
@@ -161,7 +162,7 @@ pub struct WeightInspectionReport {
     pub unused_keys: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WeightDtypeMismatch {
     pub canonical_key: String,
     pub matched_key: String,
@@ -169,7 +170,7 @@ pub struct WeightDtypeMismatch {
     pub actual_dtype: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WeightShapeMismatch {
     pub canonical_key: String,
     pub matched_key: String,

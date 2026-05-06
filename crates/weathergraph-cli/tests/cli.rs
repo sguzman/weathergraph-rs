@@ -6,6 +6,7 @@ use flate2::{Compression, write::GzEncoder};
 use ndarray::{Array1, Array2};
 use ndarray_npy::NpzWriter;
 use safetensors::{Dtype, SafeTensors, tensor::TensorView, tensor::serialize_to_file};
+use serde_json::Value;
 use tempfile::tempdir;
 
 fn write_npz_gz(
@@ -260,6 +261,38 @@ fn inspect_weights_reports_shape_mismatches_for_incompatible_config() {
     assert!(stdout.contains("Shape mismatches:"));
     assert!(stdout.contains("encoder_edge_mlp.layers.0.weight"));
     assert!(stdout.contains("expected [3, 3] got [2, 2]"));
+}
+
+#[test]
+fn inspect_weights_supports_json_output() {
+    let fixture_dir = build_fixture_dir();
+    let weights_path = fixture_dir.path().join("weights.safetensors");
+    write_safetensors_fixture(&weights_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
+        .args([
+            "inspect-weights",
+            "--weights",
+            weights_path.to_str().expect("weights path"),
+            "--hidden-dim",
+            "2",
+            "--json",
+        ])
+        .output()
+        .expect("run inspect-weights json");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout");
+    let payload: Value = serde_json::from_str(&stdout).expect("json payload");
+    assert_eq!(
+        payload["missing_required"][0],
+        Value::String("encoder_node_mlp.layers.0.weight".to_owned())
+    );
+    assert_eq!(payload["shape_mismatches"], Value::Array(Vec::new()));
+    assert_eq!(
+        payload["unused_keys"][0],
+        Value::String("unused.tensor".to_owned())
+    );
 }
 
 #[test]

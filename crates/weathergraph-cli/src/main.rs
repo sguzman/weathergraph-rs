@@ -36,6 +36,8 @@ enum Commands {
     InspectWeights {
         #[arg(long)]
         weights: PathBuf,
+        #[arg(long)]
+        json: bool,
         #[arg(long, default_value_t = 78)]
         input_channels: usize,
         #[arg(long, default_value_t = 78)]
@@ -85,12 +87,14 @@ fn main() -> Result<()> {
         Commands::InspectGeometry { data_dir: _ } => inspect_geometry()?,
         Commands::InspectWeights {
             weights,
+            json,
             input_channels,
             output_channels,
             hidden_dim,
             use_layer_norm,
         } => inspect_weights(
             &weights,
+            json,
             input_channels,
             output_channels,
             hidden_dim,
@@ -159,6 +163,7 @@ fn inspect_geometry() -> Result<()> {
 
 fn inspect_weights(
     weights: &PathBuf,
+    json: bool,
     input_channels: usize,
     output_channels: usize,
     hidden_dim: usize,
@@ -171,6 +176,10 @@ fn inspect_weights(
     config.hidden_dim = hidden_dim;
     config.use_layer_norm = use_layer_norm;
     let report = KeislerGnn::inspect_safetensors(weights, &config)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
     println!("Weights: {}", weights.display());
     println!("Available keys: {}", report.available_keys.len());
     println!("Required coverage: {}", report.required_coverage());
