@@ -207,7 +207,14 @@ impl KeislerGnn {
         config: &ModelConfig,
         device: &Device,
     ) -> Result<Self> {
-        let processor_edge_mlp = load_mlp("processor_edge_mlp", tensors, config, device)?;
+        let processor_edge_mlp = load_mlp_with_aliases(
+            &["processor_edge_mlp"],
+            tensors,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.use_layer_norm,
+            device,
+        )?;
         Ok(Self {
             input_projection: load_linear_or_identity(
                 "input_projection",
@@ -216,10 +223,28 @@ impl KeislerGnn {
                 config.hidden_dim,
                 device,
             )?,
-            encoder_edge_mlp: load_mlp("encoder_edge_mlp", tensors, config, device)?,
-            encoder_node_mlp: load_mlp("encoder_node_mlp", tensors, config, device)?,
+            encoder_edge_mlp: load_mlp_with_aliases(
+                &["encoder_edge_mlp"],
+                tensors,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.use_layer_norm,
+                device,
+            )?,
+            encoder_node_mlp: load_mlp_with_aliases(
+                &["encoder_node_mlp"],
+                tensors,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.use_layer_norm,
+                device,
+            )?,
             processor_edge_init_mlp: load_mlp_optional(
-                "processor_edge_init_mlp",
+                &[
+                    "processor_edge_init_mlp",
+                    "processor_edge_mlp_init",
+                    "net_edges",
+                ],
                 tensors,
                 config.hidden_dim,
                 true,
@@ -227,10 +252,24 @@ impl KeislerGnn {
             )?
             .unwrap_or_else(|| processor_edge_mlp.clone()),
             processor_edge_mlp,
-            processor_node_mlp: load_mlp("processor_node_mlp", tensors, config, device)?,
-            decoder_edge_mlp: load_mlp("decoder_edge_mlp", tensors, config, device)?,
-            decoder_node_mlp: load_mlp_with_dims(
-                "decoder_node_mlp",
+            processor_node_mlp: load_mlp_with_aliases(
+                &["processor_node_mlp"],
+                tensors,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.use_layer_norm,
+                device,
+            )?,
+            decoder_edge_mlp: load_mlp_with_aliases(
+                &["decoder_edge_mlp"],
+                tensors,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.use_layer_norm,
+                device,
+            )?,
+            decoder_node_mlp: load_mlp_with_aliases(
+                &["decoder_node_mlp"],
                 tensors,
                 config.hidden_dim,
                 config.hidden_dim,
@@ -532,35 +571,21 @@ fn layer_norm_identity(width: usize, device: &Device) -> Result<LayerNorm> {
     })
 }
 
-fn load_mlp(
-    prefix: &str,
-    tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
-    config: &ModelConfig,
-    device: &Device,
-) -> Result<Mlp> {
-    load_mlp_with_dims(
-        prefix,
-        tensors,
-        config.hidden_dim,
-        config.hidden_dim,
-        config.use_layer_norm,
-        device,
-    )
-}
-
 fn load_mlp_optional(
-    prefix: &str,
+    prefixes: &[&str],
     tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
     hidden_dim: usize,
     with_layer_norm: bool,
     device: &Device,
 ) -> Result<Option<Mlp>> {
-    let weight_key = format!("{prefix}.layers.0.weight");
-    if !tensors.contains_key(&weight_key) {
+    let has_any_prefix = prefixes
+        .iter()
+        .any(|prefix| has_any_tensor_key(prefix, tensors));
+    if !has_any_prefix {
         return Ok(None);
     }
-    load_mlp_with_dims(
-        prefix,
+    load_mlp_with_aliases(
+        prefixes,
         tensors,
         hidden_dim,
         hidden_dim,
@@ -570,8 +595,8 @@ fn load_mlp_optional(
     .map(Some)
 }
 
-fn load_mlp_with_dims(
-    prefix: &str,
+fn load_mlp_with_aliases(
+    prefixes: &[&str],
     tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
     input_dim: usize,
     hidden_dim: usize,
@@ -579,24 +604,40 @@ fn load_mlp_with_dims(
     device: &Device,
 ) -> Result<Mlp> {
     let layer0 = LinearLayer {
-        weight: load_tensor(tensors, &format!("{prefix}.layers.0.weight"), device)?,
-        bias: load_tensor(tensors, &format!("{prefix}.layers.0.bias"), device).ok(),
+        weight: load_tensor_any(
+            tensors,
+            &candidate_param_keys(prefixes, "layers.0", "weight"),
+            device,
+        )?,
+        bias: load_tensor_any_optional(
+            tensors,
+            &candidate_param_keys(prefixes, "layers.0", "bias"),
+            device,
+        )?,
     };
     let layer1 = LinearLayer {
-        weight: load_tensor(tensors, &format!("{prefix}.layers.1.weight"), device)?,
-        bias: load_tensor(tensors, &format!("{prefix}.layers.1.bias"), device).ok(),
+        weight: load_tensor_any(
+            tensors,
+            &candidate_param_keys(prefixes, "layers.1", "weight"),
+            device,
+        )?,
+        bias: load_tensor_any_optional(
+            tensors,
+            &candidate_param_keys(prefixes, "layers.1", "bias"),
+            device,
+        )?,
     };
 
     if layer0.weight.dims2()? != (hidden_dim, input_dim) {
         return Err(WeatherGraphError::ShapeMismatch {
-            name: format!("{prefix}.layers.0.weight"),
+            name: format!("{}.layers.0.weight", prefixes[0]),
             expected: format!("[{hidden_dim}, {input_dim}]"),
             actual: format!("{:?}", layer0.weight.dims()),
         });
     }
     if layer1.weight.dims2()? != (hidden_dim, hidden_dim) {
         return Err(WeatherGraphError::ShapeMismatch {
-            name: format!("{prefix}.layers.1.weight"),
+            name: format!("{}.layers.1.weight", prefixes[0]),
             expected: format!("[{hidden_dim}, {hidden_dim}]"),
             actual: format!("{:?}", layer1.weight.dims()),
         });
@@ -604,8 +645,16 @@ fn load_mlp_with_dims(
 
     let layer_norm = if with_layer_norm {
         Some(LayerNorm {
-            weight: load_tensor(tensors, &format!("{prefix}.layer_norm.weight"), device)?,
-            bias: load_tensor(tensors, &format!("{prefix}.layer_norm.bias"), device)?,
+            weight: load_tensor_any(
+                tensors,
+                &candidate_layer_norm_keys(prefixes, "weight"),
+                device,
+            )?,
+            bias: load_tensor_any(
+                tensors,
+                &candidate_layer_norm_keys(prefixes, "bias"),
+                device,
+            )?,
             eps: 1.0e-5_f32,
         })
     } else {
@@ -625,34 +674,87 @@ fn load_linear_or_identity(
     output_dim: usize,
     device: &Device,
 ) -> Result<LinearLayer> {
-    let weight_key = format!("{prefix}.weight");
-    let bias_key = format!("{prefix}.bias");
-    if let Some((shape, values)) = tensors.get(&weight_key) {
-        let weight = Tensor::from_vec(values.clone(), shape.as_slice(), device)?;
-        let bias = tensors
-            .get(&bias_key)
-            .map(|(bias_shape, bias_values)| {
-                Tensor::from_vec(bias_values.clone(), bias_shape.as_slice(), device)
-            })
-            .transpose()?;
+    if let Some(weight) = load_tensor_any_optional(
+        tensors,
+        &[format!("{prefix}.weight"), format!("{prefix}.w")],
+        device,
+    )? {
+        let bias = load_tensor_any_optional(
+            tensors,
+            &[format!("{prefix}.bias"), format!("{prefix}.b")],
+            device,
+        )?;
         return Ok(LinearLayer { weight, bias });
     }
 
     linear_identity(input_dim, output_dim, device)
 }
 
-fn load_tensor(
+fn load_tensor_any(
     tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
-    key: &str,
+    keys: &[String],
     device: &Device,
 ) -> Result<Tensor> {
-    let (shape, values) = tensors
-        .get(key)
-        .ok_or_else(|| WeatherGraphError::MissingArtifact {
-            name: key.to_owned(),
+    load_tensor_any_optional(tensors, keys, device)?.ok_or_else(|| {
+        WeatherGraphError::MissingArtifact {
+            name: keys.join(" | "),
             path: Path::new("weights.safetensors").to_path_buf(),
-        })?;
-    Ok(Tensor::from_vec(values.clone(), shape.as_slice(), device)?)
+        }
+    })
+}
+
+fn load_tensor_any_optional(
+    tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+    keys: &[String],
+    device: &Device,
+) -> Result<Option<Tensor>> {
+    for key in keys {
+        if let Some((shape, values)) = tensors.get(key) {
+            let tensor = Tensor::from_vec(values.clone(), shape.as_slice(), device)?;
+            return Ok(Some(tensor));
+        }
+    }
+    Ok(None)
+}
+
+fn candidate_param_keys(prefixes: &[&str], layer: &str, param: &str) -> Vec<String> {
+    let suffixes = match param {
+        "weight" => ["weight", "w"],
+        "bias" => ["bias", "b"],
+        _ => [param, param],
+    };
+    prefixes
+        .iter()
+        .flat_map(|prefix| {
+            [
+                format!("{prefix}.{layer}.{}", suffixes[0]),
+                format!("{prefix}.{layer}.{}", suffixes[1]),
+            ]
+        })
+        .collect()
+}
+
+fn candidate_layer_norm_keys(prefixes: &[&str], param: &str) -> Vec<String> {
+    let suffixes = match param {
+        "weight" => ["layer_norm.weight", "layer_norm.scale"],
+        "bias" => ["layer_norm.bias", "layer_norm.offset"],
+        _ => [param, param],
+    };
+    prefixes
+        .iter()
+        .flat_map(|prefix| {
+            [
+                format!("{prefix}.{}", suffixes[0]),
+                format!("{prefix}.{}", suffixes[1]),
+            ]
+        })
+        .collect()
+}
+
+fn has_any_tensor_key(prefix: &str, tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>) -> bool {
+    tensors.contains_key(&format!("{prefix}.layers.0.weight"))
+        || tensors.contains_key(&format!("{prefix}.layers.0.w"))
+        || tensors.contains_key(&format!("{prefix}.w"))
 }
 
 #[cfg(test)]
@@ -748,6 +850,88 @@ mod tests {
         }
 
         let model = KeislerGnn::from_weight_map(&tensors, &config, &device).expect("weight map");
+        let input = Tensor::from_vec(vec![1.0_f32, 2.0], (1, 2), &device).expect("input");
+        let output = model.one_step(&input).expect("one step");
+        assert_eq!(output.dims2().expect("dims"), (1, 2));
+    }
+
+    #[test]
+    fn gnn_loads_alias_style_weight_map() {
+        let device = Device::Cpu;
+        let config = ModelConfig {
+            input_channels: 2,
+            output_channels: 2,
+            hidden_dim: 2,
+            processor_blocks: 1,
+            use_layer_norm: true,
+        };
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "input_projection.w".to_owned(),
+            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        tensors.insert("input_projection.b".to_owned(), (vec![2], vec![0.0, 0.0]));
+        tensors.insert(
+            "output_projection.w".to_owned(),
+            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        tensors.insert("output_projection.b".to_owned(), (vec![2], vec![0.0, 0.0]));
+
+        for prefix in [
+            "encoder_edge_mlp",
+            "encoder_node_mlp",
+            "processor_edge_mlp",
+            "processor_node_mlp",
+            "decoder_edge_mlp",
+            "decoder_node_mlp",
+        ] {
+            for layer in ["layers.0", "layers.1"] {
+                tensors.insert(
+                    format!("{prefix}.{layer}.w"),
+                    (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+                );
+                tensors.insert(format!("{prefix}.{layer}.b"), (vec![2], vec![0.0, 0.0]));
+            }
+        }
+
+        for prefix in [
+            "encoder_edge_mlp",
+            "encoder_node_mlp",
+            "processor_edge_mlp",
+            "processor_node_mlp",
+            "decoder_edge_mlp",
+        ] {
+            tensors.insert(
+                format!("{prefix}.layer_norm.scale"),
+                (vec![2], vec![1.0, 1.0]),
+            );
+            tensors.insert(
+                format!("{prefix}.layer_norm.offset"),
+                (vec![2], vec![0.0, 0.0]),
+            );
+        }
+
+        tensors.insert(
+            "net_edges.layers.0.w".to_owned(),
+            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        tensors.insert("net_edges.layers.0.b".to_owned(), (vec![2], vec![0.0, 0.0]));
+        tensors.insert(
+            "net_edges.layers.1.w".to_owned(),
+            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+        );
+        tensors.insert("net_edges.layers.1.b".to_owned(), (vec![2], vec![0.0, 0.0]));
+        tensors.insert(
+            "net_edges.layer_norm.scale".to_owned(),
+            (vec![2], vec![1.0, 1.0]),
+        );
+        tensors.insert(
+            "net_edges.layer_norm.offset".to_owned(),
+            (vec![2], vec![0.0, 0.0]),
+        );
+
+        let model =
+            KeislerGnn::from_weight_map(&tensors, &config, &device).expect("alias weight map");
         let input = Tensor::from_vec(vec![1.0_f32, 2.0], (1, 2), &device).expect("input");
         let output = model.one_step(&input).expect("one step");
         assert_eq!(output.dims2().expect("dims"), (1, 2));
