@@ -14,6 +14,7 @@ import argparse
 import json
 import pathlib
 import pickle
+import re
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -44,6 +45,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable heuristic renaming of common upstream module/function names",
     )
+    parser.add_argument(
+        "--emit-unmapped",
+        help="Optional path to write raw flattened keys that still need manual mapping after aliasing",
+    )
     return parser.parse_args()
 
 
@@ -68,13 +73,20 @@ def main() -> int:
             print(f"  {key}", file=sys.stderr)
 
     mapping = load_mapping(args.mapping_file)
-    flat_mapped = remap_keys(flat_raw, mapping, auto_alias=not args.no_auto_alias)
+    flat_mapped, unmapped = remap_keys(flat_raw, mapping, auto_alias=not args.no_auto_alias)
     ensure_unique_keys(flat_mapped)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     save_file(flat_mapped, str(out))
+    if args.emit_unmapped:
+        emit_unmapped(pathlib.Path(args.emit_unmapped), unmapped)
     print(f"Loaded upstream pickle type: {type(payload)!r}", file=sys.stderr)
     print(f"Exported {len(flat_mapped)} tensors to {out}", file=sys.stderr)
+    if unmapped:
+        print(
+            f"{len(unmapped)} raw keys still require manual review or mapping",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -118,30 +130,46 @@ def remap_keys(
     explicit_mapping: dict[str, str],
     *,
     auto_alias: bool,
-) -> dict[str, np.ndarray]:
+) -> tuple[dict[str, np.ndarray], list[str]]:
     remapped: dict[str, np.ndarray] = {}
+    unmapped: list[str] = []
     for raw_key, value in tensors.items():
         mapped_key = explicit_mapping.get(raw_key)
         if mapped_key is None and auto_alias:
             mapped_key = alias_key(raw_key)
         if mapped_key is None:
             mapped_key = raw_key
+            unmapped.append(raw_key)
         remapped[mapped_key] = value
-    return remapped
+    return remapped, sorted(unmapped)
 
 
 def alias_key(raw_key: str) -> str | None:
-    module_prefix = infer_module_prefix(raw_key)
+    normalized_key = normalize_flat_key(raw_key)
+    module_prefix = infer_module_prefix(normalized_key)
     if module_prefix is None:
         return None
 
-    if ".layer_norm." in raw_key or raw_key.endswith(".scale") or raw_key.endswith(".offset"):
-        return map_layer_norm_key(raw_key, module_prefix)
+    if (
+        ".layer_norm." in normalized_key
+        or normalized_key.endswith(".scale")
+        or normalized_key.endswith(".offset")
+    ):
+        return map_layer_norm_key(normalized_key, module_prefix)
 
-    if raw_key.endswith(".w") or raw_key.endswith(".b"):
-        return map_linear_key(raw_key, module_prefix)
+    if normalized_key.endswith(".w") or normalized_key.endswith(".b"):
+        return map_linear_key(normalized_key, module_prefix)
 
     return None
+
+
+def normalize_flat_key(raw_key: str) -> str:
+    normalized = raw_key.replace("/~/", ".").replace("/", ".")
+    normalized = normalized.replace("._", ".")
+    normalized = normalized.replace("~.", "")
+    normalized = normalized.replace(".~", "")
+    normalized = normalized.replace("..", ".")
+    return normalized.strip(".")
 
 
 def infer_module_prefix(raw_key: str) -> str | None:
@@ -165,10 +193,10 @@ def infer_module_prefix(raw_key: str) -> str | None:
 
 
 def map_linear_key(raw_key: str, module_prefix: str) -> str:
-    if ".linear_1." in raw_key:
-        layer_idx = 1
-    else:
-        layer_idx = 0
+    match = re.search(r"\.linear(?:_(\d+))?\.(w|b)$", raw_key)
+    if match is None:
+        raise ValueError(f"unable to infer linear layer index from key: {raw_key}")
+    layer_idx = int(match.group(1) or 0)
     suffix = "weight" if raw_key.endswith(".w") else "bias"
     return f"{module_prefix}.layers.{layer_idx}.{suffix}"
 
@@ -191,6 +219,12 @@ def ensure_unique_keys(tensors: dict[str, np.ndarray]) -> None:
         if key in seen:
             raise ValueError(f"duplicate mapped tensor key after remap: {key}")
         seen.add(key)
+
+
+def emit_unmapped(path: pathlib.Path, unmapped: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"unmapped_raw_keys": unmapped}
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def maybe_array(node: Any) -> np.ndarray | None:
