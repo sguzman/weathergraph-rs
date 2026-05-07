@@ -1,4 +1,4 @@
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 
 use crate::error::{Result, WeatherGraphError};
 
@@ -14,26 +14,18 @@ pub fn shape_string(shape: &[usize]) -> String {
 }
 
 pub fn gather_rows(tensor: &Tensor, indices: &[u32]) -> Result<Tensor> {
-    let values = tensor.to_vec2::<f32>()?;
-    let feature_dim = values.first().map_or(0, Vec::len);
-    let mut gathered = Vec::with_capacity(indices.len() * feature_dim);
-
+    let (n_rows, _) = tensor.dims2()?;
     for &index in indices {
-        let row = values
-            .get(index as usize)
-            .ok_or_else(|| WeatherGraphError::ShapeMismatch {
+        if usize::try_from(index).unwrap_or(usize::MAX) >= n_rows {
+            return Err(WeatherGraphError::ShapeMismatch {
                 name: "gather_rows".to_owned(),
-                expected: format!("index < {}", values.len()),
+                expected: format!("index < {n_rows}"),
                 actual: index.to_string(),
-            })?;
-        gathered.extend_from_slice(row);
+            });
+        }
     }
-
-    Ok(Tensor::from_vec(
-        gathered,
-        (indices.len(), feature_dim),
-        &Device::Cpu,
-    )?)
+    let indexes = Tensor::from_vec(indices.to_vec(), indices.len(), tensor.device())?;
+    tensor.index_select(&indexes, 0).map_err(Into::into)
 }
 
 pub fn aggregate_receivers(
@@ -41,39 +33,40 @@ pub fn aggregate_receivers(
     receivers: &[u32],
     n_nodes: usize,
 ) -> Result<Tensor> {
-    let edge_values = edge_features.to_vec2::<f32>()?;
-    if edge_values.len() != receivers.len() {
+    let (n_edges, feature_dim) = edge_features.dims2()?;
+    if n_edges != receivers.len() {
         return Err(WeatherGraphError::ShapeMismatch {
             name: "aggregate_receivers".to_owned(),
-            expected: edge_values.len().to_string(),
+            expected: n_edges.to_string(),
             actual: receivers.len().to_string(),
         });
     }
-
-    let feature_dim = edge_values.first().map_or(0, Vec::len);
-    let mut aggregated = vec![0.0_f32; n_nodes * feature_dim];
-
-    for (edge_index, receiver) in receivers.iter().copied().enumerate() {
-        let receiver = receiver as usize;
-        if receiver >= n_nodes {
+    for &receiver in receivers {
+        if usize::try_from(receiver).unwrap_or(usize::MAX) >= n_nodes {
             return Err(WeatherGraphError::ShapeMismatch {
                 name: "aggregate_receivers".to_owned(),
                 expected: format!("receiver < {n_nodes}"),
                 actual: receiver.to_string(),
             });
         }
-
-        for feature_index in 0..feature_dim {
-            aggregated[(receiver * feature_dim) + feature_index] +=
-                edge_values[edge_index][feature_index];
-        }
     }
-
-    Ok(Tensor::from_vec(
-        aggregated,
+    let mut expanded = Vec::with_capacity(receivers.len() * feature_dim);
+    for &receiver in receivers {
+        expanded.extend(std::iter::repeat_n(receiver, feature_dim));
+    }
+    let indexes = Tensor::from_vec(
+        expanded,
+        (receivers.len(), feature_dim),
+        edge_features.device(),
+    )?;
+    let zeros = Tensor::zeros(
         (n_nodes, feature_dim),
-        &Device::Cpu,
-    )?)
+        edge_features.dtype(),
+        edge_features.device(),
+    )?;
+    zeros
+        .scatter_add(&indexes, edge_features, 0)
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
