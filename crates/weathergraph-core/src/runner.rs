@@ -282,6 +282,14 @@ impl Runner {
     }
 
     fn era5_state_rows(&self, state: &Tensor) -> Result<Vec<f32>> {
+        let (_, width) = state.dims2()?;
+        if width != self.config.model.output_channels {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: "era5_state_rows".to_owned(),
+                expected: self.config.model.output_channels.to_string(),
+                actual: width.to_string(),
+            });
+        }
         state
             .narrow(0, 0, self.graphs.n_era5_nodes)?
             .flatten_all()?
@@ -326,21 +334,7 @@ impl Runner {
         for (variable_index, variable_name) in VARNAMES.iter().enumerate() {
             let mut variable = file
                 .add_variable::<f32>(variable_name, &["time", "level", "latitude", "longitude"])?;
-            let mut values =
-                Vec::with_capacity(states.len() * LEVELS.len() * ERA5_LAT_COUNT * ERA5_LON_COUNT);
-            for state in states {
-                for level_index in 0..LEVELS.len() {
-                    for lat_index in 0..ERA5_LAT_COUNT {
-                        for lon_index in 0..ERA5_LON_COUNT {
-                            let channel_index = (variable_index * LEVELS.len()) + level_index;
-                            let node_index = (lat_index * ERA5_LON_COUNT) + lon_index;
-                            let state_index =
-                                (node_index * self.config.model.output_channels) + channel_index;
-                            values.push(state.get(state_index).copied().unwrap_or(0.0));
-                        }
-                    }
-                }
-            }
+            let values = self.variable_output_values(states, variable_index)?;
             variable.put_values(&values, ..)?;
         }
 
@@ -352,6 +346,41 @@ impl Runner {
             "wrote forecast NetCDF output"
         );
         Ok(())
+    }
+
+    fn variable_output_values(
+        &self,
+        states: &[Vec<f32>],
+        variable_index: usize,
+    ) -> Result<Vec<f32>> {
+        let output_channels = self.config.model.output_channels;
+        let expected_len = self.graphs.n_era5_nodes * output_channels;
+        let mut values =
+            Vec::with_capacity(states.len() * LEVELS.len() * ERA5_LAT_COUNT * ERA5_LON_COUNT);
+
+        for state in states {
+            if state.len() != expected_len {
+                return Err(WeatherGraphError::ShapeMismatch {
+                    name: "forecast state buffer".to_owned(),
+                    expected: expected_len.to_string(),
+                    actual: state.len().to_string(),
+                });
+            }
+            for level_index in 0..LEVELS.len() {
+                let channel_index = (variable_index * LEVELS.len()) + level_index;
+                if channel_index >= output_channels {
+                    values.extend(std::iter::repeat_n(0.0_f32, self.graphs.n_era5_nodes));
+                    continue;
+                }
+                values.extend(
+                    state
+                        .chunks_exact(output_channels)
+                        .map(|node| node[channel_index]),
+                );
+            }
+        }
+
+        Ok(values)
     }
 }
 
