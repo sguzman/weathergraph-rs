@@ -23,12 +23,12 @@ tests/fixtures/parity/one_step/
 
 `tensors.safetensors` keys:
 
-- `input_state`
+- `input_state` - normalized model-space node state
 - `solar`
 - `doy`
 - `orography`
 - `landsea`
-- `expected_output`
+- `expected_output` - normalized model-space node state after one step
 
 Generate this fixture with `tools/export_parity_fixture.py` from an environment where the upstream Python model can run.
 

@@ -281,7 +281,11 @@ impl Runner {
             .map(|index| i64::try_from(index).unwrap_or(i64::MAX).saturating_mul(6))
             .collect::<Vec<_>>();
         time_variable.put_values(&time_values, ..)?;
-        time_variable.put_attribute("units", "hours since init")?;
+        time_variable.put_attribute(
+            "units",
+            format!("hours since {}", request.init.format("%Y-%m-%d %H:%M:%S")),
+        )?;
+        time_variable.put_attribute("calendar", "standard")?;
 
         let mut level_variable = file.add_variable::<i32>("level", &["level"])?;
         level_variable.put_values(&LEVELS, ..)?;

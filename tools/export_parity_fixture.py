@@ -18,6 +18,20 @@ import numpy as np
 from safetensors.numpy import save_file
 
 
+def patch_h3_compat() -> None:
+    try:
+        import h3
+    except ImportError:
+        return
+
+    if not hasattr(h3, "get_res0_indexes") and hasattr(h3, "get_res0_cells"):
+        h3.get_res0_indexes = h3.get_res0_cells
+    if not hasattr(h3, "h3_to_children") and hasattr(h3, "cell_to_children"):
+        h3.h3_to_children = h3.cell_to_children
+    if not hasattr(h3, "h3_to_geo") and hasattr(h3, "cell_to_latlng"):
+        h3.h3_to_geo = h3.cell_to_latlng
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", required=True, help="Fixture output directory")
@@ -45,6 +59,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        patch_h3_compat()
         import pandas as pd
         import xarray as xr
         from keisler_2022.config import Config as UpstreamConfig, DataConfig

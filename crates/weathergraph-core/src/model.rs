@@ -19,17 +19,8 @@ pub struct LinearLayer {
 
 impl LinearLayer {
     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let inputs = input.to_vec2::<f32>()?;
-        let weights = self.weight.to_vec2::<f32>()?;
-        let biases = self
-            .bias
-            .as_ref()
-            .map(Tensor::to_vec1::<f32>)
-            .transpose()?
-            .unwrap_or_else(|| vec![0.0; weights.len()]);
-        let input_dim = inputs.first().map_or(0, Vec::len);
-        let weight_input_dim = weights.first().map_or(0, Vec::len);
-
+        let (_, input_dim) = input.dims2()?;
+        let (output_dim, weight_input_dim) = self.weight.dims2()?;
         if input_dim != weight_input_dim {
             return Err(WeatherGraphError::ShapeMismatch {
                 name: "linear layer".to_owned(),
@@ -38,24 +29,19 @@ impl LinearLayer {
             });
         }
 
-        let mut output = Vec::with_capacity(inputs.len() * weights.len());
-        for row in &inputs {
-            for (out_index, weight_row) in weights.iter().enumerate() {
-                let value = row
-                    .iter()
-                    .zip(weight_row)
-                    .map(|(lhs, rhs)| lhs * rhs)
-                    .sum::<f32>()
-                    + biases[out_index];
-                output.push(value);
+        let mut output = input.matmul(&self.weight.t()?)?;
+        if let Some(bias) = &self.bias {
+            let bias_width = bias.dims1()?;
+            if bias_width != output_dim {
+                return Err(WeatherGraphError::ShapeMismatch {
+                    name: "linear layer bias".to_owned(),
+                    expected: output_dim.to_string(),
+                    actual: bias_width.to_string(),
+                });
             }
+            output = output.broadcast_add(&bias.reshape((1, output_dim))?)?;
         }
-
-        Ok(Tensor::from_vec(
-            output,
-            (inputs.len(), weights.len()),
-            &Device::Cpu,
-        )?)
+        Ok(output)
     }
 }
 

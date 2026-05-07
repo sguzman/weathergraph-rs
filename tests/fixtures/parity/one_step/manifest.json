@@ -1,0 +1,8 @@
+{
+  "data_dir": "/tmp/weathergraph-real-data",
+  "weights_file": "/tmp/weathergraph-real-data/weights.safetensors",
+  "upstream_pkl": "good_era5_forecast_batch001_feats0256_blocks009_steps12_stride02_noise0.0000_l10.0000000_lr0.000003_lrd0_ethereal-brook-316_val1.0347996_idx030200.pkl",
+  "init": "2020-01-01T00:00:00Z",
+  "steps": 1,
+  "tolerance": 0.0001
+}

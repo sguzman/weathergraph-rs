@@ -43,6 +43,15 @@ data/
 - `vertical_velocity`
 - `geopotential`
 
+You can generate that file from the public ARCO dataset with:
+
+```bash
+source /tmp/weathergraph-venv/bin/activate
+python tools/fetch_arco_era5.py \
+  --init 2020-01-01T00:00:00Z \
+  --out /path/to/data/era5_input.nc
+```
+
 ## Weight Export Contract
 
 Use `tools/export_weights.py` against the upstream `.pkl` weight file. The exporter:
@@ -153,12 +162,12 @@ That fixture feeds the Rust parity test in `crates/weathergraph-core/tests/parit
 
 Expected tensor keys:
 
-- `input_state`
+- `input_state` - normalized model-space node state, not raw physical units
 - `solar`
 - `doy`
 - `orography`
 - `landsea`
-- `expected_output`
+- `expected_output` - normalized model-space node state after one step
 
 The manifest supplies the fixture tolerance and the data/weight paths used to generate the reference output.
 

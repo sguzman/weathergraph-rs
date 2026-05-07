@@ -62,19 +62,10 @@ fn one_step_fixture_matches_reference_when_present() {
     // Keep the request exercised even though the parity call uses exported tensors directly.
     request.validate().expect("validate request");
 
-    let normalized = runner.normalizer.normalize(&input).expect("normalize");
     let actual = runner
         .model
-        .one_step_graph(
-            &normalized,
-            &runner.graphs,
-            &solar,
-            &doy,
-            &orography,
-            &landsea,
-        )
+        .one_step_graph(&input, &runner.graphs, &solar, &doy, &orography, &landsea)
         .expect("one-step graph");
-    let actual = runner.normalizer.denormalize(&actual).expect("denormalize");
 
     let max_abs_error = max_abs_error(&actual, &expected);
     assert!(

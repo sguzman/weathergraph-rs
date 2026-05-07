@@ -50,6 +50,7 @@ weathergraph-rs/
 ├── tests/
 │   └── fixtures/
 └── tools/
+    ├── fetch_arco_era5.py
     ├── export_parity_fixture.py
     ├── export_weights.py
     └── weight_mapping.example.json
@@ -105,6 +106,15 @@ Expected files:
 - `geopotential`
 
 See [artifacts/README.md](artifacts/README.md) for the finalized export contract.
+
+You can generate a compliant local ERA5 initialization file directly from the public ARCO dataset with:
+
+```bash
+source /tmp/weathergraph-venv/bin/activate
+python tools/fetch_arco_era5.py \
+  --init 2020-01-01T00:00:00Z \
+  --out /path/to/data/era5_input.nc
+```
 
 ## CLI
 
