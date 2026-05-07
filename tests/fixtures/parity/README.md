@@ -44,3 +44,11 @@ python3 tools/export_parity_fixture.py \
 ```
 
 The Rust test at `crates/weathergraph-core/tests/parity_fixture.rs` runs automatically when the fixture exists. If the fixture directory or manifest is absent, the parity test is skipped instead of failing the workspace.
+
+For performance work, run it directly so the fixture timing stays visible:
+
+```bash
+cargo test -p weathergraph-core --test parity_fixture -- --nocapture
+```
+
+This fixture is the acceptance gate for parity-safe optimization. Runtime may improve, but the manifest tolerance must still pass unchanged.

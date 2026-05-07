@@ -52,6 +52,8 @@ python tools/fetch_arco_era5.py \
   --out /path/to/data/era5_input.nc
 ```
 
+This is the only supported runtime input contract. `opendata` is intentionally unsupported in the Rust runner.
+
 ## Weight Export Contract
 
 Use `tools/export_weights.py` against the upstream `.pkl` weight file. The exporter:
@@ -181,6 +183,30 @@ python3 tools/export_parity_fixture.py \
   --init 2020-01-01T00:00:00Z \
   --out-dir tests/fixtures/parity/one_step
 ```
+
+Use the parity fixture as the optimization gate:
+
+```bash
+cargo test -p weathergraph-core --test parity_fixture -- --nocapture
+```
+
+If a performance change exceeds the fixture tolerance, treat it as a regression and revert it.
+
+## Forecast Output Contract
+
+`weathergraph forecast` writes a NetCDF file with:
+
+- dimensions: `time`, `level`, `latitude`, `longitude`
+- time coordinate values in 6-hour increments starting at `0`
+- time units: `hours since <init>`
+- time calendar: `standard`
+- variables:
+  - `specific_humidity`
+  - `temperature`
+  - `u_component_of_wind`
+  - `v_component_of_wind`
+  - `vertical_velocity`
+  - `geopotential`
 
 ## Notes
 

@@ -582,4 +582,53 @@ fn forecast_writes_netcdf_when_weights_are_valid() {
 
     assert!(output.status.success());
     assert!(output_path.exists());
+
+    let file = netcdf::open(&output_path).expect("open forecast nc");
+    assert_eq!(
+        file.dimension("time").expect("time dim").len(),
+        2,
+        "expected init state plus one forecast step"
+    );
+    assert_eq!(file.dimension("level").expect("level dim").len(), 13);
+    assert_eq!(file.dimension("latitude").expect("latitude dim").len(), 181);
+    assert_eq!(
+        file.dimension("longitude").expect("longitude dim").len(),
+        360
+    );
+
+    let time = file.variable("time").expect("time variable");
+    assert_eq!(
+        time.attribute_value("units")
+            .transpose()
+            .expect("read time units")
+            .map(String::try_from)
+            .transpose()
+            .expect("time units string conversion")
+            .expect("time units attr"),
+        "hours since 2020-01-01 00:00:00"
+    );
+    assert_eq!(
+        time.attribute_value("calendar")
+            .transpose()
+            .expect("read calendar attr")
+            .map(String::try_from)
+            .transpose()
+            .expect("calendar string conversion")
+            .expect("calendar attr"),
+        "standard"
+    );
+
+    for variable_name in [
+        "specific_humidity",
+        "temperature",
+        "u_component_of_wind",
+        "v_component_of_wind",
+        "vertical_velocity",
+        "geopotential",
+    ] {
+        let variable = file.variable(variable_name).expect("forecast variable");
+        let dims = variable.dimensions();
+        let shape = dims.iter().map(netcdf::Dimension::len).collect::<Vec<_>>();
+        assert_eq!(shape, vec![2, 13, 181, 360], "{variable_name} dims");
+    }
 }

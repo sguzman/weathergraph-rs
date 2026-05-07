@@ -1219,7 +1219,7 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     use super::{
-        KeislerGnn, Mlp, TensorMetadata, WeightInspectionReport, encoder_edge_input_dim,
+        KeislerGnn, LayerNorm, Mlp, TensorMetadata, WeightInspectionReport, encoder_edge_input_dim,
         inspect_weight_keys, inspect_weight_metadata, layer_norm_identity, linear_identity,
     };
     use crate::config::ModelConfig;
@@ -1300,6 +1300,27 @@ mod tests {
         let input = Tensor::from_vec(vec![1.0_f32, -1.0], (1, 2), &device).expect("input");
         let output = mlp.forward(&input).expect("forward");
         assert_eq!(output.dims2().expect("dims"), (1, 2));
+    }
+
+    #[test]
+    fn manual_layer_norm_matches_expected_values() {
+        let device = Device::Cpu;
+        let layer_norm = LayerNorm {
+            weight: Tensor::from_vec(vec![1.0_f32, 1.5], 2, &device).expect("weight"),
+            bias: Tensor::from_vec(vec![0.0_f32, -0.5], 2, &device).expect("bias"),
+            eps: 1.0e-5_f32,
+        };
+        let input = Tensor::from_vec(vec![1.0_f32, 3.0], (1, 2), &device).expect("input");
+        let output = layer_norm.forward(&input).expect("forward");
+        let values = output.to_vec2::<f32>().expect("values");
+
+        let denom = (1.0_f32 + 1.0e-5_f32).sqrt();
+        let expected = vec![vec![(-1.0_f32 / denom), (1.5_f32 / denom) - 0.5_f32]];
+        for (actual_row, expected_row) in values.iter().zip(&expected) {
+            for (actual, expected_value) in actual_row.iter().zip(expected_row) {
+                assert!((actual - expected_value).abs() < 1.0e-6_f32);
+            }
+        }
     }
 
     #[test]

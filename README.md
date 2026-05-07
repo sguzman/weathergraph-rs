@@ -14,10 +14,17 @@ Rust-native inference port of the Keisler 2022 graph neural weather forecasting 
 | MLP and LayerNorm parity | Implemented | Explicit Rust/Candle modules with strict weight inspection. |
 | One-step runner/model path | Implemented | Graph-aware one-step execution with solar, day-of-year, and surface features. |
 | CLI and logging | Implemented | `inspect-artifacts`, `inspect-geometry`, `inspect-weights`, and `forecast`. |
-| Python/Rust parity workflow | Implemented | Weight export, mapping-template, strict inspection, and one-step fixture harness. |
+| Python/Rust parity workflow | Implemented | Weight export, strict inspection, and one-step parity validation against real upstream tensors. |
 | Autoregressive rollout / NetCDF output | Implemented | `forecast` performs local ERA5-style initialization, rollout, and `.nc` writing. |
 
-Numeric parity against the original Python model still depends on running the export tooling against real upstream artifacts and checking in or regenerating a real fixture. The repo now contains the full workflow and acceptance harness for that step.
+The supported V1 path is now fixed:
+
+- exported `safetensors` checkpoint
+- local ERA5-style `era5_input.nc`
+- one-step parity fixture
+- autoregressive rollout to NetCDF
+
+Performance work should preserve the current parity fixture tolerance rather than widening it.
 
 ## Scope
 
@@ -36,7 +43,7 @@ Out of scope:
 - direct loading of Python pickle checkpoints from Rust
 - network-dependent realtime ingestion in the default path
 
-`opendata` remains intentionally unsupported in the runner until there is a robust local contract for it. V1 uses prepared local ERA5-style NetCDF initialization files.
+`opendata` remains intentionally unsupported in the runner. V1 uses prepared local ERA5-style NetCDF initialization files.
 
 ## Workspace Layout
 
@@ -156,6 +163,13 @@ cargo run -p weathergraph-cli -- forecast \
 
 The `forecast` command now performs real rollout and writes NetCDF output. Model-shape override flags also exist on `forecast` for small synthetic fixtures and debugging, but the real upstream path should use the default `78 / 78 / 256` configuration unless the exported checkpoint says otherwise.
 
+Supported production boundary:
+
+- input mode: `era5`
+- output format: `.nc`
+- checkpoint format: exported `safetensors`
+- logging: `tracing`
+
 ## End-to-End Workflow
 
 1. Dry-run checkpoint export and inspect raw keys:
@@ -221,13 +235,49 @@ cargo run -p weathergraph-cli -- forecast \
   --out ./forecast.nc
 ```
 
+7. Inspect the output contract:
+
+- dimensions: `time`, `level`, `latitude`, `longitude`
+- time values: 6-hour increments starting at `0`
+- time units: `hours since <init>`
+- time calendar: `standard`
+- forecast variables:
+  - `specific_humidity`
+  - `temperature`
+  - `u_component_of_wind`
+  - `v_component_of_wind`
+  - `vertical_velocity`
+  - `geopotential`
+
 ## Logging
 
-All user-visible logging goes through `tracing`. The default CLI level is `info`. Override with `RUST_LOG`, for example:
+All user-visible logging goes through `tracing`. The default CLI level is `info`. The runner emits timing logs for artifact/model load, ERA5 input load, one-step execution, rollout completion, and NetCDF write. Override with `RUST_LOG`, for example:
 
 ```bash
 RUST_LOG=debug cargo run -p weathergraph-cli -- inspect-artifacts --data-dir /path/to/data
 ```
+
+## Performance Workflow
+
+Use the real parity fixture as the optimization gate:
+
+```bash
+cargo test -p weathergraph-core --test parity_fixture -- --nocapture
+```
+
+Use the real forecast path as the end-to-end runtime check:
+
+```bash
+RUST_LOG=info cargo run -p weathergraph-cli -- forecast \
+  --data-dir /path/to/data \
+  --weights /path/to/data/weights.safetensors \
+  --init 2020-01-01T00:00:00Z \
+  --steps 1 \
+  --input era5 \
+  --out ./forecast.nc
+```
+
+The current CPU baseline for the committed one-step parity fixture is about 59 seconds. Any optimization that improves runtime but breaks the fixture tolerance should be rejected.
 
 ## Development
 
@@ -255,6 +305,6 @@ The parity test in `crates/weathergraph-core/tests/parity_fixture.rs` executes a
 
 ## Current Limitations
 
-- Exact numeric parity is not claimed until a real upstream checkpoint and one-step fixture are exported and validated through the committed harness.
 - `opendata` is still rejected with a clear runtime error.
 - The Rust checkpoint contract is strict by design; missing required tensors, dtype mismatches, or shape mismatches fail inspection and loading.
+- CPU performance is still dominated by the parity-safe model path, especially manual layer normalization.

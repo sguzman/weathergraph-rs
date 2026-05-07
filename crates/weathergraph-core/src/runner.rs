@@ -1,5 +1,7 @@
 use candle_core::{Device, Tensor};
 use chrono::Duration;
+use std::time::Instant;
+use tracing::info;
 
 use crate::config::{Config, ForecastInputKind, ForecastRequest};
 use crate::error::{Result, WeatherGraphError};
@@ -32,6 +34,7 @@ pub struct Runner {
 
 impl Runner {
     pub fn load(config: Config) -> Result<Self> {
+        let started_at = Instant::now();
         let device = Device::Cpu;
         let graphs = GraphSet::load(&config.artifacts.data_dir, &config.data)?;
         let normalizer = Normalizer::load(
@@ -44,6 +47,11 @@ impl Runner {
         } else {
             KeislerGnn::placeholder(&config.model, &device)?
         };
+        info!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            data_dir = %config.artifacts.data_dir.display(),
+            "runner loaded artifacts, normalizer, and model"
+        );
 
         Ok(Self {
             config,
@@ -82,6 +90,7 @@ impl Runner {
         step_index: usize,
         request: &ForecastRequest,
     ) -> Result<Tensor> {
+        let started_at = Instant::now();
         let (n_nodes, feature_dim) = state.dims2()?;
         let expected_channels = self.config.model.input_channels;
         if feature_dim != expected_channels {
@@ -122,10 +131,17 @@ impl Runner {
             &orography,
             &landsea,
         )?;
-        self.normalizer.denormalize(&output)
+        let denormalized = self.normalizer.denormalize(&output)?;
+        info!(
+            step_index,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "completed one-step graph forecast"
+        );
+        Ok(denormalized)
     }
 
     pub fn run_forecast(&self, request: &ForecastRequest) -> Result<()> {
+        let started_at = Instant::now();
         self.validate_request(request)?;
         let mut current_state = self.load_initial_state(request)?;
         let mut states = Vec::with_capacity(request.steps + 1);
@@ -136,7 +152,14 @@ impl Runner {
             states.push(self.era5_state_rows(&current_state)?);
         }
 
-        self.write_forecast_netcdf(request, &states)
+        self.write_forecast_netcdf(request, &states)?;
+        info!(
+            steps = request.steps,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            output = %request.out.display(),
+            "completed forecast rollout and NetCDF write"
+        );
+        Ok(())
     }
 
     fn centered_solar_tensor(&self, valid_time: chrono::DateTime<chrono::Utc>) -> Result<Tensor> {
@@ -186,19 +209,21 @@ impl Runner {
     }
 
     fn load_era5_input_state(&self) -> Result<Tensor> {
+        let started_at = Instant::now();
         let path = self
             .config
             .artifacts
             .data_dir
             .join(&self.config.data.era5_input_file);
         let file = netcdf::open(path)?;
-        let mut channels = Vec::with_capacity(VARNAMES.len() * LEVELS.len());
+        let width = self.config.model.input_channels;
+        let mut padded = vec![0.0_f32; self.graphs.n_total_nodes * width];
 
-        for variable_name in VARNAMES {
+        for (variable_index, variable_name) in VARNAMES.iter().enumerate() {
             let variable =
                 file.variable(variable_name)
                     .ok_or_else(|| WeatherGraphError::MissingArtifact {
-                        name: variable_name.to_owned(),
+                        name: (*variable_name).to_owned(),
                         path: self
                             .config
                             .artifacts
@@ -213,7 +238,7 @@ impl Runner {
                 || dims[3].len() != ERA5_LON_COUNT
             {
                 return Err(WeatherGraphError::ShapeMismatch {
-                    name: variable_name.to_owned(),
+                    name: (*variable_name).to_owned(),
                     expected: format!(
                         "[1, {}, {}, {}]",
                         LEVELS.len(),
@@ -234,42 +259,38 @@ impl Runner {
             for level_index in 0..LEVELS.len() {
                 let start = level_index * ERA5_LAT_COUNT * ERA5_LON_COUNT;
                 let end = start + (ERA5_LAT_COUNT * ERA5_LON_COUNT);
-                channels.push(values[start..end].to_vec());
+                let channel_index = (variable_index * LEVELS.len()) + level_index;
+                if channel_index >= width {
+                    break;
+                }
+                for (node_index, value) in values[start..end].iter().enumerate() {
+                    padded[(node_index * width) + channel_index] = *value;
+                }
             }
         }
 
-        let mut padded =
-            vec![0.0_f32; self.graphs.n_total_nodes * self.config.model.input_channels];
-        let width = self.config.model.input_channels;
-        for row_index in 0..self.graphs.n_era5_nodes {
-            let target_offset = row_index * width;
-            for channel_index in 0..width {
-                let value = channels
-                    .get(channel_index)
-                    .and_then(|channel| channel.get(row_index))
-                    .copied()
-                    .unwrap_or(0.0);
-                padded[target_offset + channel_index] = value;
-            }
-        }
-        Tensor::from_vec(
+        let tensor = Tensor::from_vec(
             padded,
             (self.graphs.n_total_nodes, self.config.model.input_channels),
             &self.device,
-        )
-        .map_err(Into::into)
+        )?;
+        info!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "loaded local ERA5 initialization state"
+        );
+        Ok(tensor)
     }
 
     fn era5_state_rows(&self, state: &Tensor) -> Result<Vec<f32>> {
-        let rows = state.to_vec2::<f32>()?;
-        Ok(rows
-            .into_iter()
-            .take(self.graphs.n_era5_nodes)
-            .flatten()
-            .collect::<Vec<_>>())
+        state
+            .narrow(0, 0, self.graphs.n_era5_nodes)?
+            .flatten_all()?
+            .to_vec1::<f32>()
+            .map_err(Into::into)
     }
 
     fn write_forecast_netcdf(&self, request: &ForecastRequest, states: &[Vec<f32>]) -> Result<()> {
+        let started_at = Instant::now();
         let mut file = netcdf::create(&request.out)?;
         let _time_dim = file.add_dimension("time", states.len())?;
         let _level_dim = file.add_dimension("level", LEVELS.len())?;
@@ -325,15 +346,19 @@ impl Runner {
 
         file.add_attribute("init", request.init.to_rfc3339())?;
         file.add_attribute("input_kind", format!("{:?}", request.input))?;
+        info!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            states = states.len(),
+            "wrote forecast NetCDF output"
+        );
         Ok(())
     }
 }
 
 fn tensor_first_column(tensor: &Tensor, rows: usize) -> Result<Vec<f32>> {
-    let values = tensor.to_vec2::<f32>()?;
-    Ok(values
-        .into_iter()
-        .take(rows)
-        .map(|row| row.first().copied().unwrap_or(0.0))
-        .collect::<Vec<_>>())
+    tensor
+        .narrow(0, 0, rows)?
+        .flatten_all()?
+        .to_vec1::<f32>()
+        .map_err(Into::into)
 }
