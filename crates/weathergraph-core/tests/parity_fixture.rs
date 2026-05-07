@@ -38,6 +38,9 @@ fn one_step_fixture_matches_reference_when_present() {
     let manifest: ParityFixtureManifest =
         serde_json::from_slice(&fs::read(&manifest_path).expect("read parity manifest"))
             .expect("parse parity manifest");
+    if !manifest.data_dir.exists() || !manifest.weights_file.exists() {
+        return;
+    }
 
     let mut config = Config::from_data_dir(&manifest.data_dir);
     config.artifacts =

@@ -50,44 +50,51 @@ pub struct LayerNorm {
     pub weight: Tensor,
     pub bias: Tensor,
     pub eps: f32,
+    pub gamma: Vec<f32>,
+    pub beta: Vec<f32>,
 }
 
 impl LayerNorm {
+    pub fn new(weight: Tensor, bias: Tensor, eps: f32) -> Result<Self> {
+        let gamma = weight.to_vec1::<f32>()?;
+        let beta = bias.to_vec1::<f32>()?;
+        Ok(Self {
+            weight,
+            bias,
+            eps,
+            gamma,
+            beta,
+        })
+    }
+
     #[allow(clippy::cast_precision_loss)]
     pub fn forward(&self, input: &Tensor) -> Result<Tensor> {
-        let rows = input.to_vec2::<f32>()?;
-        let gamma = self.weight.to_vec1::<f32>()?;
-        let beta = self.bias.to_vec1::<f32>()?;
-        let width = rows.first().map_or(0, Vec::len);
+        let (batch, width) = input.dims2()?;
+        let values = input.flatten_all()?.to_vec1::<f32>()?;
 
-        if gamma.len() != width || beta.len() != width {
+        if self.gamma.len() != width || self.beta.len() != width {
             return Err(WeatherGraphError::ShapeMismatch {
                 name: "layer norm".to_owned(),
                 expected: format!("gamma/beta width {width}"),
-                actual: format!("{}/{}", gamma.len(), beta.len()),
+                actual: format!("{}/{}", self.gamma.len(), self.beta.len()),
             });
         }
 
-        let mut output = Vec::with_capacity(rows.len() * width);
-        for row in rows {
+        let mut output = Vec::with_capacity(values.len());
+        for row in values.chunks_exact(width) {
             let mean = row.iter().sum::<f32>() / width as f32;
-            let variance = row
-                .iter()
-                .map(|value| {
-                    let centered = *value - mean;
-                    centered * centered
-                })
-                .sum::<f32>()
-                / width as f32;
+            let variance = row.iter().fold(0.0_f32, |acc, value| {
+                let centered = *value - mean;
+                acc + (centered * centered)
+            }) / width as f32;
             let denom = (variance + self.eps).sqrt();
 
             for (index, value) in row.iter().enumerate() {
                 let normalized = (*value - mean) / denom;
-                output.push((normalized * gamma[index]) + beta[index]);
+                output.push((normalized * self.gamma[index]) + self.beta[index]);
             }
         }
 
-        let batch = output.len() / width;
         Ok(Tensor::from_vec(output, (batch, width), &Device::Cpu)?)
     }
 }
@@ -984,11 +991,11 @@ fn identity_mlp(
 }
 
 fn layer_norm_identity(width: usize, device: &Device) -> Result<LayerNorm> {
-    Ok(LayerNorm {
-        weight: Tensor::ones(width, candle_core::DType::F32, device)?,
-        bias: Tensor::zeros(width, candle_core::DType::F32, device)?,
-        eps: 1.0e-5_f32,
-    })
+    LayerNorm::new(
+        Tensor::ones(width, candle_core::DType::F32, device)?,
+        Tensor::zeros(width, candle_core::DType::F32, device)?,
+        1.0e-5_f32,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1093,11 +1100,7 @@ fn load_mlp_with_aliases(
                 actual: format!("{:?}", bias.dims()),
             });
         }
-        Some(LayerNorm {
-            weight,
-            bias,
-            eps: 1.0e-5_f32,
-        })
+        Some(LayerNorm::new(weight, bias, 1.0e-5_f32)?)
     } else {
         None
     };
@@ -1309,6 +1312,8 @@ mod tests {
             weight: Tensor::from_vec(vec![1.0_f32, 1.5], 2, &device).expect("weight"),
             bias: Tensor::from_vec(vec![0.0_f32, -0.5], 2, &device).expect("bias"),
             eps: 1.0e-5_f32,
+            gamma: vec![1.0_f32, 1.5],
+            beta: vec![0.0_f32, -0.5],
         };
         let input = Tensor::from_vec(vec![1.0_f32, 3.0], (1, 2), &device).expect("input");
         let output = layer_norm.forward(&input).expect("forward");
