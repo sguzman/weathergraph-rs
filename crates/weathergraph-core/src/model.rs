@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use safetensors::{Dtype, SafeTensors};
 use serde::Serialize;
 
@@ -859,8 +859,6 @@ fn concat_tensors(tensors: &[&Tensor]) -> Result<Tensor> {
     let rows = tensors
         .first()
         .map_or(0, |tensor| tensor.dims2().map_or(0, |dims| dims.0));
-    let mut pieces = Vec::with_capacity(tensors.len());
-    let mut total_width = 0_usize;
     for tensor in tensors {
         let (tensor_rows, width) = tensor.dims2()?;
         if tensor_rows != rows {
@@ -870,53 +868,32 @@ fn concat_tensors(tensors: &[&Tensor]) -> Result<Tensor> {
                 actual: tensor_rows.to_string(),
             });
         }
-        total_width += width;
-        pieces.push(tensor.to_vec2::<f32>()?);
+        let _ = width;
     }
-
-    let mut values = Vec::with_capacity(rows * total_width);
-    for row in 0..rows {
-        for piece in &pieces {
-            values.extend_from_slice(&piece[row]);
-        }
-    }
-    Ok(Tensor::from_vec(values, (rows, total_width), &Device::Cpu)?)
+    Tensor::cat(tensors, 1).map_err(Into::into)
 }
 
 fn add_tensors(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
-    let left = lhs.to_vec2::<f32>()?;
-    let right = rhs.to_vec2::<f32>()?;
-    if left.len() != right.len()
-        || left.first().map_or(0, Vec::len) != right.first().map_or(0, Vec::len)
-    {
+    if lhs.dims() != rhs.dims() {
         return Err(WeatherGraphError::ShapeMismatch {
             name: "add_tensors".to_owned(),
             expected: format!("{:?}", lhs.dims()),
             actual: format!("{:?}", rhs.dims()),
         });
     }
-    let width = left.first().map_or(0, Vec::len);
-    let values = left
-        .into_iter()
-        .zip(right)
-        .flat_map(|(lhs_row, rhs_row)| lhs_row.into_iter().zip(rhs_row).map(|(l, r)| l + r))
-        .collect::<Vec<_>>();
-    let batch = values.len() / width;
-    Ok(Tensor::from_vec(values, (batch, width), &Device::Cpu)?)
+    lhs.broadcast_add(rhs).map_err(Into::into)
 }
 
 fn elementwise_mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
-    let left = lhs.to_vec2::<f32>()?;
-    let right = rhs.to_vec2::<f32>()?;
-    if left.len() != right.len() {
+    let (left_rows, left_width) = lhs.dims2()?;
+    let (right_rows, right_width) = rhs.dims2()?;
+    if left_rows != right_rows {
         return Err(WeatherGraphError::ShapeMismatch {
             name: "elementwise_mul".to_owned(),
-            expected: left.len().to_string(),
-            actual: right.len().to_string(),
+            expected: left_rows.to_string(),
+            actual: right_rows.to_string(),
         });
     }
-    let right_width = right.first().map_or(0, Vec::len);
-    let left_width = left.first().map_or(0, Vec::len);
     if right_width != 1 && right_width != left_width {
         return Err(WeatherGraphError::ShapeMismatch {
             name: "elementwise_mul".to_owned(),
@@ -924,34 +901,11 @@ fn elementwise_mul(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
             actual: right_width.to_string(),
         });
     }
-    let values = left
-        .into_iter()
-        .zip(right)
-        .flat_map(|(lhs_row, rhs_row)| {
-            lhs_row.into_iter().enumerate().map(move |(index, value)| {
-                let scale = if rhs_row.len() == 1 {
-                    rhs_row[0]
-                } else {
-                    rhs_row[index]
-                };
-                value * scale
-            })
-        })
-        .collect::<Vec<_>>();
-    let batch = values.len() / left_width;
-    Ok(Tensor::from_vec(values, (batch, left_width), &Device::Cpu)?)
+    lhs.broadcast_mul(rhs).map_err(Into::into)
 }
 
 fn slice_rows(tensor: &Tensor, start: usize, len: usize) -> Result<Tensor> {
-    let values = tensor.to_vec2::<f32>()?;
-    let width = values.first().map_or(0, Vec::len);
-    let slice = values
-        .into_iter()
-        .skip(start)
-        .take(len)
-        .flatten()
-        .collect::<Vec<_>>();
-    Ok(Tensor::from_vec(slice, (len, width), &Device::Cpu)?)
+    tensor.narrow(0, start, len).map_err(Into::into)
 }
 
 fn pad_h3_hidden(
@@ -960,28 +914,28 @@ fn pad_h3_hidden(
     era5_nodes: usize,
     hidden_dim: usize,
 ) -> Result<Tensor> {
-    let mut values = vec![0.0_f32; total_nodes * hidden_dim];
-    let h3_values = h3_hidden.to_vec2::<f32>()?;
-    for (row_index, row) in h3_values.iter().enumerate() {
-        let offset = (era5_nodes + row_index) * hidden_dim;
-        values[offset..offset + hidden_dim].copy_from_slice(row);
+    let (h3_rows, actual_hidden_dim) = h3_hidden.dims2()?;
+    if actual_hidden_dim != hidden_dim {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: "pad_h3_hidden".to_owned(),
+            expected: hidden_dim.to_string(),
+            actual: actual_hidden_dim.to_string(),
+        });
     }
-    Ok(Tensor::from_vec(
-        values,
-        (total_nodes, hidden_dim),
-        &Device::Cpu,
-    )?)
+    let expected_total = era5_nodes + h3_rows;
+    if total_nodes != expected_total {
+        return Err(WeatherGraphError::ShapeMismatch {
+            name: "pad_h3_hidden".to_owned(),
+            expected: expected_total.to_string(),
+            actual: total_nodes.to_string(),
+        });
+    }
+    let prefix = Tensor::zeros((era5_nodes, hidden_dim), DType::F32, h3_hidden.device())?;
+    Tensor::cat(&[&prefix, h3_hidden], 0).map_err(Into::into)
 }
 
 fn relu(tensor: &Tensor) -> Result<Tensor> {
-    let values = tensor.to_vec2::<f32>()?;
-    let width = values.first().map_or(0, Vec::len);
-    let flattened = values
-        .into_iter()
-        .flat_map(|row| row.into_iter().map(|value| value.max(0.0)))
-        .collect::<Vec<_>>();
-    let batch = flattened.len() / width;
-    Ok(Tensor::from_vec(flattened, (batch, width), &Device::Cpu)?)
+    tensor.relu().map_err(Into::into)
 }
 
 fn linear_identity(input_dim: usize, output_dim: usize, device: &Device) -> Result<LinearLayer> {

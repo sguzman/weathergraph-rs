@@ -71,34 +71,26 @@ impl Normalizer {
         if tensor.dims2()?.1 != self.means.len() {
             return Ok(tensor.clone());
         }
-
-        let mut values = tensor.to_vec2::<f32>()?;
-        for row in &mut values {
-            for (index, value) in row.iter_mut().enumerate() {
-                *value = (*value - self.means[index]) / self.stds[index];
-            }
-        }
         let width = self.means.len();
-        let flattened = values.into_iter().flatten().collect::<Vec<_>>();
-        let batch = flattened.len() / width;
-        Ok(Tensor::from_vec(flattened, (batch, width), &Device::Cpu)?)
+        let means = Tensor::from_vec(self.means.clone(), (1, width), tensor.device())?;
+        let stds = Tensor::from_vec(self.stds.clone(), (1, width), tensor.device())?;
+        tensor
+            .broadcast_sub(&means)?
+            .broadcast_div(&stds)
+            .map_err(Into::into)
     }
 
     pub fn denormalize(&self, tensor: &Tensor) -> Result<Tensor> {
         if tensor.dims2()?.1 != self.stds.len() {
             return Ok(tensor.clone());
         }
-
-        let mut values = tensor.to_vec2::<f32>()?;
-        for row in &mut values {
-            for (index, value) in row.iter_mut().enumerate() {
-                *value = (*value * self.stds[index]) + self.means[index];
-            }
-        }
         let width = self.stds.len();
-        let flattened = values.into_iter().flatten().collect::<Vec<_>>();
-        let batch = flattened.len() / width;
-        Ok(Tensor::from_vec(flattened, (batch, width), &Device::Cpu)?)
+        let means = Tensor::from_vec(self.means.clone(), (1, width), tensor.device())?;
+        let stds = Tensor::from_vec(self.stds.clone(), (1, width), tensor.device())?;
+        tensor
+            .broadcast_mul(&stds)?
+            .broadcast_add(&means)
+            .map_err(Into::into)
     }
 
     pub fn device_default() -> Device {
