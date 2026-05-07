@@ -165,8 +165,22 @@ def remap_keys(
         if mapped_key is None:
             mapped_key = raw_key
             unmapped.append(raw_key)
-        remapped[mapped_key] = value
+        remapped[mapped_key] = adapt_tensor(mapped_key, value)
     return remapped, sorted(unmapped)
+
+
+def adapt_tensor(mapped_key: str, value: np.ndarray) -> np.ndarray:
+    if is_linear_weight_key(mapped_key) and value.ndim == 2:
+        return np.asarray(value, dtype=np.float32).T
+    return np.asarray(value, dtype=np.float32)
+
+
+def is_linear_weight_key(mapped_key: str) -> bool:
+    if mapped_key.endswith(".layer_norm.weight"):
+        return False
+    if mapped_key.endswith(".weight") and ".layers." in mapped_key:
+        return True
+    return mapped_key in {"input_projection.weight", "output_projection.weight"}
 
 
 def alias_key(raw_key: str) -> str | None:

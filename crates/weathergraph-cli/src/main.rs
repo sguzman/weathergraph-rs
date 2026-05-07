@@ -293,6 +293,18 @@ fn forecast(
     hidden_dim: usize,
     use_layer_norm: bool,
 ) -> Result<()> {
+    let request = ForecastRequest {
+        init,
+        steps,
+        input,
+        out,
+    };
+    request.validate()?;
+
+    if weights.is_none() {
+        anyhow::bail!("forecast requires --weights with an exported safetensors file");
+    }
+
     let mut config = Config::from_data_dir(&data_dir);
     config.artifacts = ArtifactPaths::new(data_dir);
     config.artifacts.weights_file = weights;
@@ -301,12 +313,6 @@ fn forecast(
     config.model.hidden_dim = hidden_dim;
     config.model.use_layer_norm = use_layer_norm;
     let runner = Runner::load(config)?;
-    let request = ForecastRequest {
-        init,
-        steps,
-        input,
-        out,
-    };
     runner.run_forecast(&request)?;
     Ok(())
 }

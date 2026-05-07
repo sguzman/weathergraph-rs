@@ -18,7 +18,11 @@ pub struct Normalizer {
 }
 
 impl Normalizer {
-    pub fn load(data_dir: impl AsRef<Path>, data: &DataConfig) -> Result<Self> {
+    pub fn load(
+        data_dir: impl AsRef<Path>,
+        data: &DataConfig,
+        input_channels: usize,
+    ) -> Result<Self> {
         let data_dir = data_dir.as_ref();
         let temporal = FeatureBundle::load(data_dir.join(&data.normalizer_file))?;
         let surface = FeatureBundle::load(data_dir.join(&data.orography_landsea_file))?;
@@ -26,12 +30,22 @@ impl Normalizer {
             .get_f32(&["means"])?
             .iter()
             .copied()
+            .take(input_channels)
             .collect::<Vec<_>>();
         let stds = temporal
             .get_f32(&["stds"])?
             .iter()
             .copied()
+            .take(input_channels)
             .collect::<Vec<_>>();
+
+        if means.len() != input_channels || stds.len() != input_channels {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: "temporal normalizer".to_owned(),
+                expected: input_channels.to_string(),
+                actual: format!("{}/{}", means.len(), stds.len()),
+            });
+        }
         let orography = surface
             .get_f32(&["orography"])?
             .into_shape_with_order(ERA5_NODE_COUNT)
@@ -102,10 +116,15 @@ impl Normalizer {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use candle_core::{Device, Tensor};
+    use ndarray::Array;
+    use tempfile::tempdir;
 
     use super::Normalizer;
-    use crate::features::FeatureBundle;
+    use crate::config::DataConfig;
+    use crate::features::{FeatureBundle, load_npz_gz};
 
     #[test]
     fn normalizer_round_trip_matches_input() {
@@ -130,5 +149,61 @@ mod tests {
             restored.to_vec2::<f32>().expect("restored"),
             vec![vec![3.0, 10.0]]
         );
+    }
+
+    #[test]
+    fn load_trims_temporal_stats_to_requested_channel_count() {
+        let dir = tempdir().expect("tempdir");
+        let temporal_path = dir.path().join("temporal_normalizer.npz.gz");
+        let surface_path = dir.path().join("orography_landsea.npz.gz");
+
+        write_npz(
+            &temporal_path,
+            &[
+                (
+                    "means.npy",
+                    Array::from_vec(vec![1.0_f32, 2.0, 3.0]).into_dyn(),
+                ),
+                (
+                    "stds.npy",
+                    Array::from_vec(vec![4.0_f32, 5.0, 6.0]).into_dyn(),
+                ),
+            ],
+        );
+        write_npz(
+            &surface_path,
+            &[
+                (
+                    "orography.npy",
+                    Array::from_elem((181, 360), 0.0_f32).into_dyn(),
+                ),
+                (
+                    "landsea.npy",
+                    Array::from_elem((181, 360), 1.0_f32).into_dyn(),
+                ),
+            ],
+        );
+
+        let data = DataConfig {
+            normalizer_file: "temporal_normalizer.npz.gz".to_owned(),
+            orography_landsea_file: "orography_landsea.npz.gz".to_owned(),
+            ..DataConfig::default()
+        };
+
+        let normalizer = Normalizer::load(dir.path(), &data, 2).expect("load trimmed normalizer");
+        assert_eq!(normalizer.means, vec![1.0, 2.0]);
+        assert_eq!(normalizer.stds, vec![4.0, 5.0]);
+
+        let loaded = load_npz_gz(temporal_path).expect("sanity read npz");
+        assert_eq!(loaded.len(), 2);
+    }
+
+    fn write_npz(path: &std::path::Path, arrays: &[(&str, ndarray::ArrayD<f32>)]) {
+        let file = fs::File::create(path).expect("create npz");
+        let mut writer = ndarray_npy::NpzWriter::new(file);
+        for (name, array) in arrays {
+            writer.add_array(*name, array).expect("add array");
+        }
+        writer.finish().expect("finish npz");
     }
 }

@@ -189,11 +189,7 @@ impl FeatureBundle {
 
 pub fn load_npz_gz(path: impl AsRef<Path>) -> Result<Vec<NamedArray>> {
     let file = File::open(path.as_ref())?;
-    let decoder = GzDecoder::new(file);
-    let mut decompressed = Vec::new();
-    let mut decoder = decoder;
-    decoder.read_to_end(&mut decompressed)?;
-    let cursor = Cursor::new(decompressed);
+    let cursor = Cursor::new(load_npz_like_bytes(file)?);
     let mut reader = NpzReader::new(cursor)?;
     let names = reader.names()?;
     let mut entries = Vec::with_capacity(names.len());
@@ -247,6 +243,10 @@ pub fn load_npz_gz(path: impl AsRef<Path>) -> Result<Vec<NamedArray>> {
             continue;
         }
 
+        if name.trim_end_matches(".npy") == "local_coords" {
+            continue;
+        }
+
         return Err(WeatherGraphError::UnsupportedDtype {
             name,
             dtype: "unknown".to_owned(),
@@ -254,6 +254,21 @@ pub fn load_npz_gz(path: impl AsRef<Path>) -> Result<Vec<NamedArray>> {
     }
 
     Ok(entries)
+}
+
+fn load_npz_like_bytes(file: File) -> Result<Vec<u8>> {
+    let mut raw = Vec::new();
+    let mut file = file;
+    file.read_to_end(&mut raw)?;
+
+    if raw.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = GzDecoder::new(Cursor::new(&raw));
+        let mut decompressed = Vec::new();
+        decoder.read_to_end(&mut decompressed)?;
+        Ok(decompressed)
+    } else {
+        Ok(raw)
+    }
 }
 
 pub fn summarize_data_dir(data_dir: impl AsRef<Path>) -> Result<Vec<ArtifactSummary>> {

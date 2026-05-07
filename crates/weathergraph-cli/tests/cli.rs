@@ -14,7 +14,7 @@ fn cli_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("lock cli tests")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn write_npz_gz(
@@ -108,20 +108,20 @@ fn build_fixture_dir() -> tempfile::TempDir {
         &data_dir.join(
             "edge_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
         ),
-        vec![("local_coords", Array2::<f32>::zeros((2, 2)))],
+        vec![("local_coords_row", Array2::<f32>::zeros((2, 3)))],
         None,
     );
     write_npz_gz(
         &data_dir
             .join("edge_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz"),
-        vec![("local_coords", Array2::<f32>::zeros((1, 2)))],
+        vec![("local_coords_row", Array2::<f32>::zeros((1, 3)))],
         None,
     );
     write_npz_gz(
         &data_dir.join(
             "edge_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
         ),
-        vec![("local_coords", Array2::<f32>::zeros((2, 2)))],
+        vec![("local_coords_row", Array2::<f32>::zeros((2, 3)))],
         None,
     );
 
@@ -186,8 +186,8 @@ fn write_safetensors_fixture(path: &std::path::Path) {
     push_tensor(
         &mut tensors,
         "encoder_edge_mlp.layers.0.w",
-        vec![2, 22],
-        &[0.0_f32; 44],
+        vec![2, 23],
+        &[0.0_f32; 46],
     );
     push_tensor(
         &mut tensors,
@@ -222,13 +222,11 @@ fn write_safetensors_fixture(path: &std::path::Path) {
 fn write_complete_safetensors_fixture(path: &std::path::Path) {
     let mut tensors = Vec::new();
     for (name, input_dim, output_dim, hidden_layers, with_ln) in [
-        ("encoder_edge_mlp", 22, 2, 2, true),
+        ("encoder_edge_mlp", 23, 2, 2, true),
         ("encoder_node_mlp", 2, 2, 2, true),
-        ("processor_edge_mlp", 6, 2, 2, true),
-        ("processor_node_mlp", 10, 2, 2, true),
-        ("decoder_edge_mlp", 6, 2, 2, true),
+        ("processor_edge_init_mlp", 3, 2, 0, true),
+        ("decoder_edge_mlp", 7, 2, 2, true),
         ("decoder_node_mlp", 4, 2, 2, false),
-        ("net_edges", 2, 2, 0, true),
     ] {
         let total_layers = hidden_layers + 1;
         for layer_index in 0..total_layers {
@@ -259,6 +257,40 @@ fn write_complete_safetensors_fixture(path: &std::path::Path) {
                 &format!("{name}.layer_norm.offset"),
                 vec![output_dim],
                 &vec![0.0_f32; output_dim],
+            );
+        }
+    }
+    for block_index in 0..9 {
+        for (name, input_dim) in [
+            (format!("processor_edge_mlps.{block_index}"), 6),
+            (format!("processor_node_mlps.{block_index}"), 10),
+        ] {
+            for layer_index in 0..3 {
+                let layer_input = if layer_index == 0 { input_dim } else { 2 };
+                push_tensor(
+                    &mut tensors,
+                    &format!("{name}.layers.{layer_index}.w"),
+                    vec![2, layer_input],
+                    &vec![0.0_f32; 2 * layer_input],
+                );
+                push_tensor(
+                    &mut tensors,
+                    &format!("{name}.layers.{layer_index}.b"),
+                    vec![2],
+                    &[0.0_f32; 2],
+                );
+            }
+            push_tensor(
+                &mut tensors,
+                &format!("{name}.layer_norm.scale"),
+                vec![2],
+                &[1.0_f32; 2],
+            );
+            push_tensor(
+                &mut tensors,
+                &format!("{name}.layer_norm.offset"),
+                vec![2],
+                &[0.0_f32; 2],
             );
         }
     }

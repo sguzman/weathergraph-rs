@@ -50,6 +50,20 @@ class ExportWeightsTests(unittest.TestCase):
         self.assertIn("encoder_edge_mlp.layers.0.weight", remapped)
         self.assertEqual(unmapped, ["unknown_module.w"])
 
+    def test_remap_keys_transposes_linear_weights_for_rust_contract(self) -> None:
+        tensors = {
+            "one_step_fn.edge_update_fn_encoder.~.linear.w": np.arange(
+                6, dtype=np.float32
+            ).reshape(2, 3),
+        }
+        remapped, unmapped = self.module.remap_keys(tensors, {}, auto_alias=True)
+
+        self.assertEqual(unmapped, [])
+        np.testing.assert_array_equal(
+            remapped["encoder_edge_mlp.layers.0.weight"],
+            np.arange(6, dtype=np.float32).reshape(2, 3).T,
+        )
+
     def test_flatten_params_handles_nested_mappings_and_sequences(self) -> None:
         payload = {
             "params": [

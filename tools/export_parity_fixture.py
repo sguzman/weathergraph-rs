@@ -22,7 +22,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out-dir", required=True, help="Fixture output directory")
     parser.add_argument("--data-dir", required=True, help="Directory containing upstream artifacts")
-    parser.add_argument("--weights-file", required=True, help="Path to exported Rust safetensors weights")
+    parser.add_argument(
+        "--weights",
+        "--weights-file",
+        dest="rust_weights_file",
+        required=True,
+        help="Path to exported Rust safetensors weights",
+    )
+    parser.add_argument(
+        "--upstream-pkl",
+        help="Optional path to the upstream Haiku pickle used by the Python runner",
+    )
     parser.add_argument("--dataset", required=True, help="Path to a prepared one-step xarray dataset input")
     parser.add_argument("--init", required=True, help="Forecast init timestamp, e.g. 2020-01-01T00:00:00Z")
     parser.add_argument("--tolerance", type=float, default=1.0e-4, help="Max abs error tolerance")
@@ -44,22 +54,29 @@ def main() -> int:
             "This script must run inside an environment with keisler_2022, xarray, pandas, and upstream deps installed."
         ) from error
 
-    dataset = xr.load_dataset(args.dataset)
     data_dir = pathlib.Path(args.data_dir)
+    dataset = xr.load_dataset(args.dataset)
+    upstream_weights = pathlib.Path(args.upstream_pkl) if args.upstream_pkl else None
+    rust_weights = pathlib.Path(args.rust_weights_file)
+    default_data_config = DataConfig()
+    upstream_weights_name = (
+        upstream_weights.name if upstream_weights else default_data_config.weights_file
+    )
+
     upstream_config = UpstreamConfig(
         data=DataConfig(
-            weights_file=pathlib.Path(args.weights_file).name,
-            normalizer_file="temporal_normalizer_rk-era5-data_zarr-era5_1979begin_2020end_03hr_6phys_181lat_360lon_13levels_blosc1comp_Corder_monolith.npz.gz",
-            senders_receivers_encoder="senders_receivers_encoder.npz.gz",
-            senders_receivers_processor="senders_receivers_processor.npz.gz",
-            senders_receivers_decoder="senders_receivers_decoder.npz.gz",
-            node_features_e="node_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
-            edge_features_e="edge_features_n71042_e112246_s-8416688801745003395_r-6736346125390000850.npz.gz",
-            node_features_p="node_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz",
-            edge_features_p="edge_features_n5882_e41162_s-1135048384487896564_r7866883539119236492.npz.gz",
-            node_features_d="node_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
-            edge_features_d="edge_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz",
-            orography_landsea_file="orography_landsea.npz.gz",
+            weights_file=upstream_weights_name,
+            normalizer_file=default_data_config.normalizer_file,
+            senders_receivers_encoder=default_data_config.senders_receivers_encoder,
+            senders_receivers_processor=default_data_config.senders_receivers_processor,
+            senders_receivers_decoder=default_data_config.senders_receivers_decoder,
+            node_features_e=default_data_config.node_features_e,
+            edge_features_e=default_data_config.edge_features_e,
+            node_features_p=default_data_config.node_features_p,
+            edge_features_p=default_data_config.edge_features_p,
+            node_features_d=default_data_config.node_features_d,
+            edge_features_d=default_data_config.edge_features_d,
+            orography_landsea_file=default_data_config.orography_landsea_file,
         )
     )
 
@@ -91,7 +108,8 @@ def main() -> int:
 
     manifest = {
         "data_dir": str(data_dir),
-        "weights_file": str(pathlib.Path(args.weights_file)),
+        "weights_file": str(rust_weights),
+        "upstream_pkl": str(upstream_weights) if upstream_weights else upstream_weights_name,
         "init": args.init,
         "steps": 1,
         "tolerance": args.tolerance,

@@ -162,11 +162,15 @@ python3 tools/export_weights.py \
 
 2. Fill in any unresolved mappings, then export the final checkpoint:
 
+For the public upstream checkpoint in `rkeisler/keisler-2022`, the repo already includes a completed mapping file:
+
+- `tools/weight_mapping.keisler_2022.json`
+
 ```bash
 python3 tools/export_weights.py \
   --source /path/to/upstream.pkl \
   --out /path/to/data/weights.safetensors \
-  --mapping-file /path/to/mapping.json
+  --mapping-file tools/weight_mapping.keisler_2022.json
 ```
 
 3. Validate the exported checkpoint strictly:
@@ -184,6 +188,8 @@ cargo run -p weathergraph-cli -- inspect-weights \
 python3 tools/export_parity_fixture.py \
   --data-dir /path/to/data \
   --weights /path/to/data/weights.safetensors \
+  --dataset /path/to/data/era5_input.nc \
+  --init 2020-01-01T00:00:00Z \
   --out-dir tests/fixtures/parity/one_step
 ```
 

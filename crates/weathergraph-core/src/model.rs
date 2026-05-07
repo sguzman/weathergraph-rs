@@ -137,8 +137,8 @@ pub struct KeislerGnn {
     pub encoder_edge_mlp: Mlp,
     pub encoder_node_mlp: Mlp,
     pub processor_edge_init_mlp: Mlp,
-    pub processor_edge_mlp: Mlp,
-    pub processor_node_mlp: Mlp,
+    pub processor_edge_mlps: Vec<Mlp>,
+    pub processor_node_mlps: Vec<Mlp>,
     pub decoder_edge_mlp: Mlp,
     pub decoder_node_mlp: Mlp,
     pub output_projection: LinearLayer,
@@ -214,31 +214,39 @@ impl KeislerGnn {
                 device,
             )?,
             processor_edge_init_mlp: identity_mlp(
-                2,
+                3,
                 config.hidden_dim,
                 config.hidden_dim,
                 0,
                 config.use_layer_norm,
                 device,
             )?,
-            processor_edge_mlp: identity_mlp(
-                config.hidden_dim * 3,
-                config.hidden_dim,
-                config.hidden_dim,
-                config.n_mlp_layers_processor,
-                config.use_layer_norm,
-                device,
-            )?,
-            processor_node_mlp: identity_mlp(
-                (config.hidden_dim * 3) + 4,
-                config.hidden_dim,
-                config.hidden_dim,
-                config.n_mlp_layers_processor,
-                config.use_layer_norm,
-                device,
-            )?,
+            processor_edge_mlps: (0..config.processor_blocks)
+                .map(|_| {
+                    identity_mlp(
+                        config.hidden_dim * 3,
+                        config.hidden_dim,
+                        config.hidden_dim,
+                        config.n_mlp_layers_processor,
+                        config.use_layer_norm,
+                        device,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+            processor_node_mlps: (0..config.processor_blocks)
+                .map(|_| {
+                    identity_mlp(
+                        (config.hidden_dim * 3) + 4,
+                        config.hidden_dim,
+                        config.hidden_dim,
+                        config.n_mlp_layers_processor,
+                        config.use_layer_norm,
+                        device,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
             decoder_edge_mlp: identity_mlp(
-                2 + config.hidden_dim + config.input_channels,
+                3 + config.hidden_dim + config.input_channels,
                 config.hidden_dim,
                 config.hidden_dim,
                 config.n_mlp_layers_decoder,
@@ -320,16 +328,6 @@ impl KeislerGnn {
         config: &ModelConfig,
         device: &Device,
     ) -> Result<Self> {
-        let processor_edge_mlp = load_mlp_with_aliases(
-            &["processor_edge_mlp"],
-            tensors,
-            config.hidden_dim * 3,
-            config.hidden_dim,
-            config.hidden_dim,
-            config.use_layer_norm,
-            config.n_mlp_layers_processor,
-            device,
-        )?;
         Ok(Self {
             input_projection: load_linear_or_identity(
                 "input_projection",
@@ -365,29 +363,53 @@ impl KeislerGnn {
                     "net_edges",
                 ],
                 tensors,
-                2,
+                3,
                 config.hidden_dim,
                 config.hidden_dim,
                 true,
                 0,
                 device,
             )?
-            .unwrap_or_else(|| processor_edge_mlp.clone()),
-            processor_edge_mlp,
-            processor_node_mlp: load_mlp_with_aliases(
-                &["processor_node_mlp"],
-                tensors,
-                (config.hidden_dim * 3) + 4,
+            .unwrap_or(identity_mlp(
+                3,
                 config.hidden_dim,
                 config.hidden_dim,
+                0,
                 config.use_layer_norm,
-                config.n_mlp_layers_processor,
                 device,
-            )?,
+            )?),
+            processor_edge_mlps: (0..config.processor_blocks)
+                .map(|block_index| {
+                    load_mlp_with_aliases(
+                        &[&format!("processor_edge_mlps.{block_index}")],
+                        tensors,
+                        config.hidden_dim * 3,
+                        config.hidden_dim,
+                        config.hidden_dim,
+                        config.use_layer_norm,
+                        config.n_mlp_layers_processor,
+                        device,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
+            processor_node_mlps: (0..config.processor_blocks)
+                .map(|block_index| {
+                    load_mlp_with_aliases(
+                        &[&format!("processor_node_mlps.{block_index}")],
+                        tensors,
+                        (config.hidden_dim * 3) + 4,
+                        config.hidden_dim,
+                        config.hidden_dim,
+                        config.use_layer_norm,
+                        config.n_mlp_layers_processor,
+                        device,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?,
             decoder_edge_mlp: load_mlp_with_aliases(
                 &["decoder_edge_mlp"],
                 tensors,
-                2 + config.hidden_dim + config.input_channels,
+                3 + config.hidden_dim + config.input_channels,
                 config.hidden_dim,
                 config.hidden_dim,
                 config.use_layer_norm,
@@ -470,7 +492,11 @@ impl KeislerGnn {
         let mut processor_node_hidden =
             slice_rows(&encoder_hidden, graphs.n_era5_nodes, graphs.n_h3_nodes)?;
 
-        for _ in 0..self.n_processor_blocks {
+        for (processor_edge_mlp, processor_node_mlp) in self
+            .processor_edge_mlps
+            .iter()
+            .zip(&self.processor_node_mlps)
+        {
             let sender_node_hidden =
                 gather_rows(&processor_node_hidden, &graphs.processor.senders)?;
             let receiver_node_hidden =
@@ -480,7 +506,7 @@ impl KeislerGnn {
                 &sender_node_hidden,
                 &receiver_node_hidden,
             ])?;
-            let processor_edge_delta = self.processor_edge_mlp.forward(&processor_edge_input)?;
+            let processor_edge_delta = processor_edge_mlp.forward(&processor_edge_input)?;
             processor_edge_hidden = add_tensors(&processor_edge_hidden, &processor_edge_delta)?;
 
             let agg_sender = aggregate_receivers(
@@ -502,7 +528,7 @@ impl KeislerGnn {
                 &elementwise_mul(&agg_sender, &graphs.processor.node_tensors.inv_n_receivers)?,
                 &elementwise_mul(&agg_receiver, &graphs.processor.node_tensors.inv_n_senders)?,
             ])?;
-            let processor_node_delta = self.processor_node_mlp.forward(&processor_node_input)?;
+            let processor_node_delta = processor_node_mlp.forward(&processor_node_input)?;
             processor_node_hidden = add_tensors(&processor_node_hidden, &processor_node_delta)?;
         }
 
@@ -651,7 +677,7 @@ struct ExpectedWeightEntry {
 }
 
 fn encoder_edge_input_dim(config: &ModelConfig) -> usize {
-    let mut width = 2 + config.input_channels + SOLAR_TIME_SHIFTS_HOURS.len() + 2;
+    let mut width = 3 + config.input_channels + SOLAR_TIME_SHIFTS_HOURS.len() + 2;
     if config.use_lat {
         width += 2;
     }
@@ -669,7 +695,7 @@ fn encoder_like_input_dim(prefix: &str, config: &ModelConfig) -> usize {
         "encoder_edge_mlp" => encoder_edge_input_dim(config),
         "processor_edge_mlp" => config.hidden_dim * 3,
         "processor_node_mlp" => (config.hidden_dim * 3) + 4,
-        "decoder_edge_mlp" => 2 + config.hidden_dim + config.input_channels,
+        "decoder_edge_mlp" => 3 + config.hidden_dim + config.input_channels,
         _ => config.hidden_dim,
     }
 }
@@ -689,13 +715,7 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
         false,
     ));
 
-    for prefix in [
-        "encoder_edge_mlp",
-        "encoder_node_mlp",
-        "processor_edge_mlp",
-        "processor_node_mlp",
-        "decoder_edge_mlp",
-    ] {
+    for prefix in ["encoder_edge_mlp", "encoder_node_mlp", "decoder_edge_mlp"] {
         entries.extend(expected_mlp_entries(
             prefix,
             encoder_like_input_dim(prefix, config),
@@ -712,6 +732,30 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
             &[prefix],
         ));
     }
+    for block_index in 0..config.processor_blocks {
+        let edge_prefix = format!("processor_edge_mlps.{block_index}");
+        entries.extend(expected_mlp_entries(
+            &edge_prefix,
+            config.hidden_dim * 3,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.use_layer_norm,
+            true,
+            config.n_mlp_layers_processor,
+            &[&edge_prefix],
+        ));
+        let node_prefix = format!("processor_node_mlps.{block_index}");
+        entries.extend(expected_mlp_entries(
+            &node_prefix,
+            (config.hidden_dim * 3) + 4,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.use_layer_norm,
+            true,
+            config.n_mlp_layers_processor,
+            &[&node_prefix],
+        ));
+    }
     entries.extend(expected_mlp_entries(
         "decoder_node_mlp",
         config.input_channels + config.hidden_dim,
@@ -724,7 +768,7 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     ));
     entries.extend(expected_mlp_entries(
         "processor_edge_init_mlp",
-        2,
+        3,
         config.hidden_dim,
         config.hidden_dim,
         true,
@@ -1374,28 +1418,40 @@ mod tests {
         );
         insert_mlp(
             &mut tensors,
-            "processor_edge_mlp",
-            config.hidden_dim * 3,
+            "processor_edge_init_mlp",
+            3,
             config.hidden_dim,
             config.hidden_dim,
-            config.n_mlp_layers_processor,
+            0,
             true,
             false,
         );
-        insert_mlp(
-            &mut tensors,
-            "processor_node_mlp",
-            (config.hidden_dim * 3) + 4,
-            config.hidden_dim,
-            config.hidden_dim,
-            config.n_mlp_layers_processor,
-            true,
-            false,
-        );
+        for block_index in 0..config.processor_blocks {
+            insert_mlp(
+                &mut tensors,
+                &format!("processor_edge_mlps.{block_index}"),
+                config.hidden_dim * 3,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_processor,
+                true,
+                false,
+            );
+            insert_mlp(
+                &mut tensors,
+                &format!("processor_node_mlps.{block_index}"),
+                (config.hidden_dim * 3) + 4,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_processor,
+                true,
+                false,
+            );
+        }
         insert_mlp(
             &mut tensors,
             "decoder_edge_mlp",
-            2 + config.hidden_dim + config.input_channels,
+            3 + config.hidden_dim + config.input_channels,
             config.hidden_dim,
             config.hidden_dim,
             config.n_mlp_layers_decoder,
@@ -1457,28 +1513,40 @@ mod tests {
         );
         insert_mlp(
             &mut tensors,
-            "processor_edge_mlp",
-            config.hidden_dim * 3,
+            "net_edges",
+            3,
             config.hidden_dim,
             config.hidden_dim,
-            config.n_mlp_layers_processor,
+            0,
             true,
             true,
         );
-        insert_mlp(
-            &mut tensors,
-            "processor_node_mlp",
-            (config.hidden_dim * 3) + 4,
-            config.hidden_dim,
-            config.hidden_dim,
-            config.n_mlp_layers_processor,
-            true,
-            true,
-        );
+        for block_index in 0..config.processor_blocks {
+            insert_mlp(
+                &mut tensors,
+                &format!("processor_edge_mlps.{block_index}"),
+                config.hidden_dim * 3,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_processor,
+                true,
+                true,
+            );
+            insert_mlp(
+                &mut tensors,
+                &format!("processor_node_mlps.{block_index}"),
+                (config.hidden_dim * 3) + 4,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_processor,
+                true,
+                true,
+            );
+        }
         insert_mlp(
             &mut tensors,
             "decoder_edge_mlp",
-            2 + config.hidden_dim + config.input_channels,
+            3 + config.hidden_dim + config.input_channels,
             config.hidden_dim,
             config.hidden_dim,
             config.n_mlp_layers_decoder,
@@ -1495,17 +1563,6 @@ mod tests {
             false,
             true,
         );
-        insert_mlp(
-            &mut tensors,
-            "net_edges",
-            2,
-            config.hidden_dim,
-            config.hidden_dim,
-            0,
-            true,
-            true,
-        );
-
         let model =
             KeislerGnn::from_weight_map(&tensors, &config, &device).expect("alias weight map");
         let input = Tensor::from_vec(vec![1.0_f32, 2.0], (1, 2), &device).expect("input");

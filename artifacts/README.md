@@ -51,7 +51,8 @@ Use `tools/export_weights.py` against the upstream `.pkl` weight file. The expor
 2. flattens the parameter tree
 3. applies optional mapping and alias normalization
 4. writes a single `safetensors` file
-5. preserves `f32` dtype and original tensor shapes
+5. transposes upstream linear weights from Haiku `[in, out]` storage into the Rust `[out, in]` contract
+6. preserves `f32` dtype
 
 Recommended workflow:
 
@@ -72,16 +73,22 @@ python3 tools/export_weights.py \
 - the generated mapping template
 - `tools/weight_mapping.example.json`
 
-3. Export the final checkpoint:
+3. Export the final checkpoint. For the public upstream checkpoint in `rkeisler/keisler-2022`, the repo already includes the completed mapping file:
+
+- `tools/weight_mapping.keisler_2022.json`
+
+Use it directly unless you are exporting a different checkpoint layout.
+
+4. Export the final checkpoint:
 
 ```bash
 python3 tools/export_weights.py \
   --source /path/to/upstream.pkl \
   --out /path/to/data/weights.safetensors \
-  --mapping-file /path/to/mapping.json
+  --mapping-file tools/weight_mapping.keisler_2022.json
 ```
 
-4. Validate it strictly before parity or forecast:
+5. Validate it strictly before parity or forecast:
 
 ```bash
 cargo run -p weathergraph-cli -- inspect-weights \
@@ -112,8 +119,8 @@ The same layered structure applies to:
 
 - `encoder_node_mlp`
 - `processor_edge_init_mlp`
-- `processor_edge_mlp`
-- `processor_node_mlp`
+- `processor_edge_mlps.{block_index}`
+- `processor_node_mlps.{block_index}`
 - `decoder_edge_mlp`
 - `decoder_node_mlp`
 
@@ -154,6 +161,17 @@ Expected tensor keys:
 - `expected_output`
 
 The manifest supplies the fixture tolerance and the data/weight paths used to generate the reference output.
+
+Recommended real-artifact command:
+
+```bash
+python3 tools/export_parity_fixture.py \
+  --data-dir /path/to/data \
+  --weights /path/to/data/weights.safetensors \
+  --dataset /path/to/data/era5_input.nc \
+  --init 2020-01-01T00:00:00Z \
+  --out-dir tests/fixtures/parity/one_step
+```
 
 ## Notes
 

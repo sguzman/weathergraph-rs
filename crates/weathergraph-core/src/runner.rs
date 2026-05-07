@@ -34,7 +34,11 @@ impl Runner {
     pub fn load(config: Config) -> Result<Self> {
         let device = Device::Cpu;
         let graphs = GraphSet::load(&config.artifacts.data_dir, &config.data)?;
-        let normalizer = Normalizer::load(&config.artifacts.data_dir, &config.data)?;
+        let normalizer = Normalizer::load(
+            &config.artifacts.data_dir,
+            &config.data,
+            config.model.input_channels,
+        )?;
         let model = if let Some(weights_file) = &config.artifacts.weights_file {
             KeislerGnn::from_safetensors(weights_file, &config.model, &device)?
         } else {
