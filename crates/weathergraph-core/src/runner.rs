@@ -30,6 +30,12 @@ pub struct Runner {
     pub normalizer: Normalizer,
     pub model: KeislerGnn,
     pub device: Device,
+    pub era5_coslat: Vec<f32>,
+    pub era5_sinlat: Vec<f32>,
+    pub era5_coslon: Vec<f32>,
+    pub era5_sinlon: Vec<f32>,
+    pub orography: Tensor,
+    pub landsea: Tensor,
 }
 
 impl Runner {
@@ -47,6 +53,18 @@ impl Runner {
         } else {
             KeislerGnn::placeholder(&config.model, &device)?
         };
+        let era5_coslat =
+            tensor_first_column(&graphs.encoder.node_tensors.coslat, graphs.n_era5_nodes)?;
+        let era5_sinlat =
+            tensor_first_column(&graphs.encoder.node_tensors.sinlat, graphs.n_era5_nodes)?;
+        let era5_coslon =
+            tensor_first_column(&graphs.encoder.node_tensors.coslon, graphs.n_era5_nodes)?;
+        let era5_sinlon =
+            tensor_first_column(&graphs.encoder.node_tensors.sinlon, graphs.n_era5_nodes)?;
+        let (orography_values, landsea_values) =
+            normalizer.encoder_surface_features(graphs.n_total_nodes);
+        let orography = Tensor::from_vec(orography_values, (graphs.n_total_nodes, 1), &device)?;
+        let landsea = Tensor::from_vec(landsea_values, (graphs.n_total_nodes, 1), &device)?;
         info!(
             elapsed_ms = started_at.elapsed().as_millis(),
             data_dir = %config.artifacts.data_dir.display(),
@@ -59,6 +77,12 @@ impl Runner {
             normalizer,
             model,
             device,
+            era5_coslat,
+            era5_sinlat,
+            era5_coslon,
+            era5_sinlon,
+            orography,
+            landsea,
         })
     }
 
@@ -112,24 +136,14 @@ impl Runner {
         let valid_time = request.init + Duration::hours(step_index.saturating_mul(6));
         let solar = self.centered_solar_tensor(valid_time)?;
         let doy = self.day_of_year_tensor(valid_time)?;
-        let (orography_values, landsea_values) = self
-            .normalizer
-            .encoder_surface_features(self.graphs.n_total_nodes);
-        let orography = Tensor::from_vec(
-            orography_values,
-            (self.graphs.n_total_nodes, 1),
-            &self.device,
-        )?;
-        let landsea =
-            Tensor::from_vec(landsea_values, (self.graphs.n_total_nodes, 1), &self.device)?;
         let normalized = self.normalizer.normalize(state)?;
         let output = self.model.one_step_graph(
             &normalized,
             &self.graphs,
             &solar,
             &doy,
-            &orography,
-            &landsea,
+            &self.orography,
+            &self.landsea,
         )?;
         let denormalized = self.normalizer.denormalize(&output)?;
         info!(
@@ -163,24 +177,13 @@ impl Runner {
     }
 
     fn centered_solar_tensor(&self, valid_time: chrono::DateTime<chrono::Utc>) -> Result<Tensor> {
-        let coslat = tensor_first_column(
-            &self.graphs.encoder.node_tensors.coslat,
-            self.graphs.n_era5_nodes,
-        )?;
-        let sinlat = tensor_first_column(
-            &self.graphs.encoder.node_tensors.sinlat,
-            self.graphs.n_era5_nodes,
-        )?;
-        let coslon = tensor_first_column(
-            &self.graphs.encoder.node_tensors.coslon,
-            self.graphs.n_era5_nodes,
-        )?;
-        let sinlon = tensor_first_column(
-            &self.graphs.encoder.node_tensors.sinlon,
-            self.graphs.n_era5_nodes,
-        )?;
-        let mut solar_values =
-            centered_solar_features(&coslat, &sinlat, &coslon, &sinlon, valid_time);
+        let mut solar_values = centered_solar_features(
+            &self.era5_coslat,
+            &self.era5_sinlat,
+            &self.era5_coslon,
+            &self.era5_sinlon,
+            valid_time,
+        );
         solar_values.extend(vec![
             0.0_f32;
             self.graphs.n_h3_nodes * SOLAR_TIME_SHIFTS_HOURS.len()
