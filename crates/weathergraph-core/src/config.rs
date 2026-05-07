@@ -40,6 +40,8 @@ pub struct DataConfig {
     pub node_features_d: String,
     pub edge_features_d: String,
     pub orography_landsea_file: String,
+    pub era5_input_file: String,
+    pub opendata_input_file: String,
 }
 
 impl Default for DataConfig {
@@ -57,6 +59,8 @@ impl Default for DataConfig {
             node_features_d: "node_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz".to_owned(),
             edge_features_d: "edge_features_n71042_e112246_s-6736346125390000850_r-8416688801745003395.npz.gz".to_owned(),
             orography_landsea_file: "orography_landsea.npz.gz".to_owned(),
+            era5_input_file: "era5_input.nc".to_owned(),
+            opendata_input_file: "opendata_input.nc".to_owned(),
         }
     }
 }
@@ -83,12 +87,19 @@ impl ArtifactPaths {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct ModelConfig {
     pub input_channels: usize,
     pub output_channels: usize,
     pub hidden_dim: usize,
     pub processor_blocks: usize,
     pub use_layer_norm: bool,
+    pub n_mlp_layers_encoder: usize,
+    pub n_mlp_layers_processor: usize,
+    pub n_mlp_layers_decoder: usize,
+    pub use_lat: bool,
+    pub use_lon: bool,
+    pub use_doy: bool,
 }
 
 impl Default for ModelConfig {
@@ -99,6 +110,12 @@ impl Default for ModelConfig {
             hidden_dim: 256,
             processor_blocks: 9,
             use_layer_norm: true,
+            n_mlp_layers_encoder: 2,
+            n_mlp_layers_processor: 2,
+            n_mlp_layers_decoder: 2,
+            use_lat: true,
+            use_lon: true,
+            use_doy: true,
         }
     }
 }

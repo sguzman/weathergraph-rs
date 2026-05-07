@@ -62,6 +62,14 @@ enum Commands {
         input: InputKindArg,
         #[arg(long)]
         out: PathBuf,
+        #[arg(long, default_value_t = 78)]
+        input_channels: usize,
+        #[arg(long, default_value_t = 78)]
+        output_channels: usize,
+        #[arg(long, default_value_t = 256)]
+        hidden_dim: usize,
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        use_layer_norm: bool,
     },
 }
 
@@ -111,7 +119,22 @@ fn main() -> Result<()> {
             steps,
             input,
             out,
-        } => forecast(data_dir, weights, init, steps, input.into(), out)?,
+            input_channels,
+            output_channels,
+            hidden_dim,
+            use_layer_norm,
+        } => forecast(
+            data_dir,
+            weights,
+            init,
+            steps,
+            input.into(),
+            out,
+            input_channels,
+            output_channels,
+            hidden_dim,
+            use_layer_norm,
+        )?,
     }
 
     Ok(())
@@ -257,6 +280,7 @@ fn enforce_strict_weight_report(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn forecast(
     data_dir: PathBuf,
     weights: Option<PathBuf>,
@@ -264,10 +288,18 @@ fn forecast(
     steps: usize,
     input: ForecastInputKind,
     out: PathBuf,
+    input_channels: usize,
+    output_channels: usize,
+    hidden_dim: usize,
+    use_layer_norm: bool,
 ) -> Result<()> {
     let mut config = Config::from_data_dir(&data_dir);
     config.artifacts = ArtifactPaths::new(data_dir);
     config.artifacts.weights_file = weights;
+    config.model.input_channels = input_channels;
+    config.model.output_channels = output_channels;
+    config.model.hidden_dim = hidden_dim;
+    config.model.use_layer_norm = use_layer_norm;
     let runner = Runner::load(config)?;
     let request = ForecastRequest {
         init,

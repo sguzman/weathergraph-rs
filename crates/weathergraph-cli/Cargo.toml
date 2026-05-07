@@ -21,6 +21,7 @@ weathergraph-core = { path = "../weathergraph-core" }
 
 [dev-dependencies]
 flate2.workspace = true
+netcdf.workspace = true
 ndarray.workspace = true
 ndarray-npy.workspace = true
 safetensors.workspace = true

@@ -13,6 +13,7 @@ candle-nn.workspace = true
 chrono.workspace = true
 flate2.workspace = true
 h3o.workspace = true
+netcdf.workspace = true
 ndarray.workspace = true
 ndarray-npy.workspace = true
 safetensors.workspace = true

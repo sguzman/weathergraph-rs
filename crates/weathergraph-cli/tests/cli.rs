@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{Cursor, Write};
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use flate2::{Compression, write::GzEncoder};
 use ndarray::{Array1, Array2};
@@ -8,6 +9,13 @@ use ndarray_npy::NpzWriter;
 use safetensors::{Dtype, SafeTensors, tensor::TensorView, tensor::serialize_to_file};
 use serde_json::Value;
 use tempfile::tempdir;
+
+fn cli_test_guard() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("lock cli tests")
+}
 
 fn write_npz_gz(
     path: &std::path::Path,
@@ -135,42 +143,138 @@ fn build_fixture_dir() -> tempfile::TempDir {
         ],
         None,
     );
+    write_era5_input_nc(&data_dir.join("era5_input.nc"));
 
     temp_dir
 }
 
-fn write_safetensors_fixture(path: &std::path::Path) {
-    let layer0_weight = encode_f32s(&[0.0_f32, 1.0, 1.0, 0.0]);
-    let layer1_weight = encode_f32s(&[1.0_f32, 0.0, 0.0, 1.0]);
-    let scale = encode_f32s(&[1.0_f32, 1.0]);
-    let offset = encode_f32s(&[0.0_f32, 0.0]);
-    let unused = encode_f32s(&[42.0_f32]);
+fn write_era5_input_nc(path: &std::path::Path) {
+    let mut file = netcdf::create(path).expect("create input nc");
+    let _time_dim = file.add_dimension("time", 1).expect("time dim");
+    let _level_dim = file.add_dimension("level", 13).expect("level dim");
+    let _lat_dim = file.add_dimension("latitude", 181).expect("lat dim");
+    let _lon_dim = file.add_dimension("longitude", 360).expect("lon dim");
+    let values = vec![0.0_f32; 13 * 181 * 360];
+    for variable_name in [
+        "specific_humidity",
+        "temperature",
+        "u_component_of_wind",
+        "v_component_of_wind",
+        "vertical_velocity",
+        "geopotential",
+    ] {
+        let mut variable = file
+            .add_variable::<f32>(variable_name, &["time", "level", "latitude", "longitude"])
+            .expect("variable");
+        variable.put_values(&values, ..).expect("put values");
+    }
+}
 
-    let tensors = vec![
-        (
-            "encoder_edge_mlp.layers.0.w".to_owned(),
-            TensorView::new(Dtype::F32, vec![2, 2], &layer0_weight).expect("layer0"),
-        ),
-        (
-            "encoder_edge_mlp.layers.1.w".to_owned(),
-            TensorView::new(Dtype::F32, vec![2, 2], &layer1_weight).expect("layer1"),
-        ),
-        (
-            "encoder_edge_mlp.layer_norm.scale".to_owned(),
-            TensorView::new(Dtype::F32, vec![2], &scale).expect("scale"),
-        ),
-        (
-            "encoder_edge_mlp.layer_norm.offset".to_owned(),
-            TensorView::new(Dtype::F32, vec![2], &offset).expect("offset"),
-        ),
-        (
-            "unused.tensor".to_owned(),
-            TensorView::new(Dtype::F32, vec![1], &unused).expect("unused"),
-        ),
-    ];
+fn push_tensor(
+    tensors: &mut Vec<(String, TensorView<'static>)>,
+    name: &str,
+    shape: Vec<usize>,
+    values: &[f32],
+) {
+    let bytes = Box::leak(encode_f32s(values).into_boxed_slice());
+    let view = TensorView::new(Dtype::F32, shape, bytes).expect("tensor view");
+    tensors.push((name.to_owned(), view));
+}
+
+fn write_safetensors_fixture(path: &std::path::Path) {
+    let mut tensors = Vec::new();
+    push_tensor(
+        &mut tensors,
+        "encoder_edge_mlp.layers.0.w",
+        vec![2, 22],
+        &[0.0_f32; 44],
+    );
+    push_tensor(
+        &mut tensors,
+        "encoder_edge_mlp.layers.1.w",
+        vec![2, 2],
+        &[0.0_f32; 4],
+    );
+    push_tensor(
+        &mut tensors,
+        "encoder_edge_mlp.layers.2.w",
+        vec![2, 2],
+        &[0.0_f32; 4],
+    );
+    push_tensor(
+        &mut tensors,
+        "encoder_edge_mlp.layer_norm.scale",
+        vec![2],
+        &[1.0_f32; 2],
+    );
+    push_tensor(
+        &mut tensors,
+        "encoder_edge_mlp.layer_norm.offset",
+        vec![2],
+        &[0.0_f32; 2],
+    );
+    push_tensor(&mut tensors, "unused.tensor", vec![1], &[42.0_f32]);
     serialize_to_file(tensors, None, path).expect("write safetensors");
     let bytes = std::fs::read(path).expect("read safetensors");
     SafeTensors::deserialize(&bytes).expect("validate safetensors");
+}
+
+fn write_complete_safetensors_fixture(path: &std::path::Path) {
+    let mut tensors = Vec::new();
+    for (name, input_dim, output_dim, hidden_layers, with_ln) in [
+        ("encoder_edge_mlp", 22, 2, 2, true),
+        ("encoder_node_mlp", 2, 2, 2, true),
+        ("processor_edge_mlp", 6, 2, 2, true),
+        ("processor_node_mlp", 10, 2, 2, true),
+        ("decoder_edge_mlp", 6, 2, 2, true),
+        ("decoder_node_mlp", 4, 2, 2, false),
+        ("net_edges", 2, 2, 0, true),
+    ] {
+        let total_layers = hidden_layers + 1;
+        for layer_index in 0..total_layers {
+            let layer_input = if layer_index == 0 { input_dim } else { 2 };
+            let layer_output = output_dim;
+            push_tensor(
+                &mut tensors,
+                &format!("{name}.layers.{layer_index}.w"),
+                vec![layer_output, layer_input],
+                &vec![0.0_f32; layer_output * layer_input],
+            );
+            push_tensor(
+                &mut tensors,
+                &format!("{name}.layers.{layer_index}.b"),
+                vec![layer_output],
+                &vec![0.0_f32; layer_output],
+            );
+        }
+        if with_ln {
+            push_tensor(
+                &mut tensors,
+                &format!("{name}.layer_norm.scale"),
+                vec![output_dim],
+                &vec![1.0_f32; output_dim],
+            );
+            push_tensor(
+                &mut tensors,
+                &format!("{name}.layer_norm.offset"),
+                vec![output_dim],
+                &vec![0.0_f32; output_dim],
+            );
+        }
+    }
+    push_tensor(
+        &mut tensors,
+        "input_projection.w",
+        vec![2, 2],
+        &[1.0_f32, 0.0, 0.0, 1.0],
+    );
+    push_tensor(
+        &mut tensors,
+        "output_projection.w",
+        vec![2, 2],
+        &[1.0_f32, 0.0, 0.0, 1.0],
+    );
+    serialize_to_file(tensors, None, path).expect("write complete safetensors");
 }
 
 fn encode_f32s(values: &[f32]) -> Vec<u8> {
@@ -182,6 +286,7 @@ fn encode_f32s(values: &[f32]) -> Vec<u8> {
 
 #[test]
 fn inspect_artifacts_lists_fixture_shapes() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
         .args([
@@ -192,7 +297,12 @@ fn inspect_artifacts_lists_fixture_shapes() {
         .output()
         .expect("run inspect-artifacts");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains("senders_receivers_encoder.npz.gz"));
     assert!(stdout.contains("values: f32 [2, 2]") || stdout.contains("senders: i64 [2]"));
@@ -200,12 +310,18 @@ fn inspect_artifacts_lists_fixture_shapes() {
 
 #[test]
 fn inspect_geometry_reports_expected_counts() {
+    let _guard = cli_test_guard();
     let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
         .args(["inspect-geometry"])
         .output()
         .expect("run inspect-geometry");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).expect("stdout");
     assert!(stdout.contains("ERA5 nodes: 65160"));
     assert!(stdout.contains("H3 nodes: 5882"));
@@ -214,6 +330,7 @@ fn inspect_geometry_reports_expected_counts() {
 
 #[test]
 fn inspect_weights_reports_missing_and_unused_keys() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let weights_path = fixture_dir.path().join("weights.safetensors");
     write_safetensors_fixture(&weights_path);
@@ -223,6 +340,10 @@ fn inspect_weights_reports_missing_and_unused_keys() {
             "inspect-weights",
             "--weights",
             weights_path.to_str().expect("weights path"),
+            "--input-channels",
+            "2",
+            "--output-channels",
+            "2",
             "--hidden-dim",
             "2",
         ])
@@ -241,6 +362,7 @@ fn inspect_weights_reports_missing_and_unused_keys() {
 
 #[test]
 fn inspect_weights_reports_shape_mismatches_for_incompatible_config() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let weights_path = fixture_dir.path().join("weights.safetensors");
     write_safetensors_fixture(&weights_path);
@@ -250,6 +372,10 @@ fn inspect_weights_reports_shape_mismatches_for_incompatible_config() {
             "inspect-weights",
             "--weights",
             weights_path.to_str().expect("weights path"),
+            "--input-channels",
+            "2",
+            "--output-channels",
+            "2",
             "--hidden-dim",
             "3",
         ])
@@ -265,6 +391,7 @@ fn inspect_weights_reports_shape_mismatches_for_incompatible_config() {
 
 #[test]
 fn inspect_weights_supports_json_output() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let weights_path = fixture_dir.path().join("weights.safetensors");
     write_safetensors_fixture(&weights_path);
@@ -274,6 +401,10 @@ fn inspect_weights_supports_json_output() {
             "inspect-weights",
             "--weights",
             weights_path.to_str().expect("weights path"),
+            "--input-channels",
+            "2",
+            "--output-channels",
+            "2",
             "--hidden-dim",
             "2",
             "--json",
@@ -297,6 +428,7 @@ fn inspect_weights_supports_json_output() {
 
 #[test]
 fn inspect_weights_strict_mode_fails_on_missing_required() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let weights_path = fixture_dir.path().join("weights.safetensors");
     write_safetensors_fixture(&weights_path);
@@ -306,6 +438,10 @@ fn inspect_weights_strict_mode_fails_on_missing_required() {
             "inspect-weights",
             "--weights",
             weights_path.to_str().expect("weights path"),
+            "--input-channels",
+            "2",
+            "--output-channels",
+            "2",
             "--hidden-dim",
             "2",
             "--strict",
@@ -321,6 +457,7 @@ fn inspect_weights_strict_mode_fails_on_missing_required() {
 
 #[test]
 fn inspect_weights_strict_mode_with_json_still_prints_report() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let weights_path = fixture_dir.path().join("weights.safetensors");
     write_safetensors_fixture(&weights_path);
@@ -330,6 +467,10 @@ fn inspect_weights_strict_mode_with_json_still_prints_report() {
             "inspect-weights",
             "--weights",
             weights_path.to_str().expect("weights path"),
+            "--input-channels",
+            "2",
+            "--output-channels",
+            "2",
             "--hidden-dim",
             "2",
             "--json",
@@ -346,6 +487,7 @@ fn inspect_weights_strict_mode_with_json_still_prints_report() {
 
 #[test]
 fn forecast_requires_weights() {
+    let _guard = cli_test_guard();
     let fixture_dir = build_fixture_dir();
     let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
         .args([
@@ -371,4 +513,41 @@ fn forecast_requires_weights() {
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr");
     assert!(stderr.contains("forecast requires --weights"));
+}
+
+#[test]
+fn forecast_writes_netcdf_when_weights_are_valid() {
+    let _guard = cli_test_guard();
+    let fixture_dir = build_fixture_dir();
+    let weights_path = fixture_dir.path().join("weights.safetensors");
+    write_complete_safetensors_fixture(&weights_path);
+    let output_path = fixture_dir.path().join("forecast.nc");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_weathergraph"))
+        .args([
+            "forecast",
+            "--data-dir",
+            fixture_dir.path().to_str().expect("fixture path"),
+            "--weights",
+            weights_path.to_str().expect("weights path"),
+            "--init",
+            "2020-01-01T00:00:00Z",
+            "--steps",
+            "1",
+            "--input",
+            "era5",
+            "--out",
+            output_path.to_str().expect("output path"),
+            "--input-channels",
+            "2",
+            "--output-channels",
+            "2",
+            "--hidden-dim",
+            "2",
+        ])
+        .output()
+        .expect("run forecast");
+
+    assert!(output.status.success());
+    assert!(output_path.exists());
 }

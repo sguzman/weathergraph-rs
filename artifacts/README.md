@@ -1,59 +1,25 @@
 # Artifact Contract
 
-`weathergraph-rs` expects large model and graph artifacts to live outside the repository. The Rust code consumes:
+`weathergraph-rs` keeps large upstream assets out of the repository. The Rust runtime consumes local artifacts for:
 
-- graph connectivity `.npz.gz` files
-- node and edge feature `.npz.gz` files
-- temporal normalizer `.npz.gz`
-- `orography_landsea.npz.gz`
-- exported model weights in `safetensors`
+- graph connectivity
+- node and edge features
+- temporal normalization
+- surface fields
+- exported model weights
+- local ERA5-style initialization input
 
 ## Upstream Source
 
-The reference data layout comes from:
+Reference layout:
 
 - <https://github.com/rkeisler/keisler-2022>
 
-The upstream Python repository currently stores the artifacts in `src/keisler_2022/data/`.
+The upstream Python project stores its artifacts under `src/keisler_2022/data/`.
 
-## Weight Export Contract
+## Required Local Files
 
-Use `tools/export_weights.py` against the original upstream `.pkl` weight file. The exporter should:
-
-1. Load the Haiku pickle from the upstream project.
-2. Flatten the parameter tree.
-3. Emit a single `safetensors` file.
-4. Preserve `f32` dtype.
-5. Preserve original tensor shapes.
-
-Recommended workflow for the first real parity pass:
-
-1. Run `tools/export_weights.py --source <upstream.pkl> --out <weights.safetensors> --dump-keys --emit-unmapped <unmapped.json> --emit-mapping-template <mapping-template.json> --dry-run` to inspect raw flattened keys and capture any keys that still need manual remapping before writing a `safetensors` file.
-2. If the heuristic aliases are insufficient, start from the generated mapping template or `tools/weight_mapping.example.json` and fill in the unresolved raw-key mappings.
-3. Re-run `tools/export_weights.py --mapping-file <mapping.json>` without `--dry-run` to produce Rust-loader-compatible weights.
-4. Run `cargo run -p weathergraph-cli -- inspect-weights --weights <weights.safetensors> --json --strict --input-channels 78 --output-channels 78 --hidden-dim 256` to verify required Rust-side keys, dtypes, and shapes before attempting parity. The JSON form is easier to diff or feed into follow-up scripts, and `--strict` gives a non-zero exit if required keys or tensor contracts are still wrong.
-
-Tensor naming convention expected by the current Rust loader:
-
-- `encoder_edge_mlp.layers.0.weight`
-- `encoder_edge_mlp.layers.0.bias`
-- `encoder_edge_mlp.layers.1.weight`
-- `encoder_edge_mlp.layers.1.bias`
-- `encoder_edge_mlp.layer_norm.weight`
-- `encoder_edge_mlp.layer_norm.bias`
-
-Repeat the same structure for:
-
-- `encoder_node_mlp`
-- `processor_edge_init_mlp`
-- `processor_edge_mlp`
-- `processor_node_mlp`
-- `decoder_edge_mlp`
-- `decoder_node_mlp`
-
-The current scaffold assumes square hidden layers of `hidden_dim x hidden_dim` and bias vectors of length `hidden_dim`. Exact upstream parity work will extend this contract if needed.
-
-## Recommended Local Layout
+Expected data directory contents:
 
 ```text
 data/
@@ -64,19 +30,111 @@ data/
 ├── senders_receivers_encoder.npz.gz
 ├── senders_receivers_processor.npz.gz
 ├── temporal_normalizer*.npz.gz
+├── era5_input.nc
 └── weights.safetensors
 ```
 
-## Notes
+`era5_input.nc` must provide these variables on dimensions `(time=1, level=13, latitude=181, longitude=360)`:
 
-- The Rust side does not read Python pickle directly.
-- Large upstream artifacts should not be committed into this repository.
-- Tiny synthetic test fixtures are acceptable for tests.
-- `tools/export_weights.py` supports explicit remapping through `--mapping-file`, light heuristic aliasing for the known upstream GNN update functions, `--emit-unmapped` for reporting the raw keys that still need manual attention, `--emit-mapping-template` for generating a fill-in JSON skeleton, and `--dry-run` for coverage inspection without writing `safetensors`.
+- `specific_humidity`
+- `temperature`
+- `u_component_of_wind`
+- `v_component_of_wind`
+- `vertical_velocity`
+- `geopotential`
+
+## Weight Export Contract
+
+Use `tools/export_weights.py` against the upstream `.pkl` weight file. The exporter:
+
+1. loads the upstream Haiku pickle
+2. flattens the parameter tree
+3. applies optional mapping and alias normalization
+4. writes a single `safetensors` file
+5. preserves `f32` dtype and original tensor shapes
+
+Recommended workflow:
+
+1. Inspect raw flattened keys and generate unresolved-key reports:
+
+```bash
+python3 tools/export_weights.py \
+  --source /path/to/upstream.pkl \
+  --out /tmp/weights.safetensors \
+  --dump-keys \
+  --emit-unmapped /tmp/unmapped.json \
+  --emit-mapping-template /tmp/mapping-template.json \
+  --dry-run
+```
+
+2. If the built-in aliases are insufficient, fill in a mapping file. Start from either:
+
+- the generated mapping template
+- `tools/weight_mapping.example.json`
+
+3. Export the final checkpoint:
+
+```bash
+python3 tools/export_weights.py \
+  --source /path/to/upstream.pkl \
+  --out /path/to/data/weights.safetensors \
+  --mapping-file /path/to/mapping.json
+```
+
+4. Validate it strictly before parity or forecast:
+
+```bash
+cargo run -p weathergraph-cli -- inspect-weights \
+  --weights /path/to/data/weights.safetensors \
+  --json \
+  --strict \
+  --input-channels 78 \
+  --output-channels 78 \
+  --hidden-dim 256
+```
+
+`inspect-weights --json --strict` is the checkpoint gate. Missing required tensors, shape mismatches, or dtype mismatches must be treated as export-contract failures.
+
+## Canonical Rust Weight Keys
+
+The Rust loader expects canonical names in this form:
+
+- `encoder_edge_mlp.layers.0.weight`
+- `encoder_edge_mlp.layers.0.bias`
+- `encoder_edge_mlp.layers.1.weight`
+- `encoder_edge_mlp.layers.1.bias`
+- `encoder_edge_mlp.layers.2.weight`
+- `encoder_edge_mlp.layers.2.bias`
+- `encoder_edge_mlp.layer_norm.weight`
+- `encoder_edge_mlp.layer_norm.bias`
+
+The same layered structure applies to:
+
+- `encoder_node_mlp`
+- `processor_edge_init_mlp`
+- `processor_edge_mlp`
+- `processor_node_mlp`
+- `decoder_edge_mlp`
+- `decoder_node_mlp`
+
+Optional projection tensors:
+
+- `input_projection.weight`
+- `input_projection.bias`
+- `output_projection.weight`
+- `output_projection.bias`
+
+Alias handling in the Rust loader also accepts common alternates such as:
+
+- `w` / `b`
+- `layer_norm.scale` / `layer_norm.offset`
+- selected upstream update-function prefixes
+
+The recommended workflow is still to export canonical names and use alias support only as a compatibility bridge.
 
 ## One-Step Parity Fixture
 
-Use `tools/export_parity_fixture.py` from an environment where the upstream Python model can run to produce:
+Use `tools/export_parity_fixture.py` from an upstream Python environment to write:
 
 ```text
 tests/fixtures/parity/one_step/
@@ -84,4 +142,22 @@ tests/fixtures/parity/one_step/
 └── tensors.safetensors
 ```
 
-This fixture is consumed by the Rust test harness at `crates/weathergraph-core/tests/parity_fixture.rs`. It allows comparing one exported upstream one-step output against the Rust graph-aware one-step path under a declared `max_abs_error` tolerance.
+That fixture feeds the Rust parity test in `crates/weathergraph-core/tests/parity_fixture.rs`.
+
+Expected tensor keys:
+
+- `input_state`
+- `solar`
+- `doy`
+- `orography`
+- `landsea`
+- `expected_output`
+
+The manifest supplies the fixture tolerance and the data/weight paths used to generate the reference output.
+
+## Notes
+
+- The Rust side does not read Python pickle directly.
+- Large upstream artifacts should not be committed into this repository.
+- Tiny synthetic fixtures are fine for tests.
+- `opendata` is not part of the current artifact contract.

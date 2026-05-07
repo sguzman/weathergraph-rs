@@ -12,6 +12,8 @@ pub enum WeatherGraphError {
     ReadNpz(#[from] ndarray_npy::ReadNpzError),
     #[error("tensor error: {0}")]
     Tensor(#[from] candle_core::Error),
+    #[error("netcdf error: {0}")]
+    Netcdf(#[from] netcdf::Error),
     #[error("safe tensors error: {0}")]
     SafeTensors(#[from] safetensors::SafeTensorError),
     #[error("time parse error: {0}")]

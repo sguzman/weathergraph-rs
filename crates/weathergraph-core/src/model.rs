@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::config::ModelConfig;
 use crate::error::{Result, WeatherGraphError};
 use crate::graph::GraphSet;
+use crate::solar::SOLAR_TIME_SHIFTS_HOURS;
 use crate::tensor::{aggregate_receivers, gather_rows};
 
 #[derive(Debug, Clone)]
@@ -190,35 +191,73 @@ impl WeightInspectionReport {
 
 impl KeislerGnn {
     pub fn placeholder(config: &ModelConfig, device: &Device) -> Result<Self> {
-        let hidden = config.hidden_dim;
-        let hidden_mlp = Mlp {
-            layers: vec![
-                linear_identity(hidden, hidden, device)?,
-                linear_identity(hidden, hidden, device)?,
-            ],
-            layer_norm: config
-                .use_layer_norm
-                .then(|| layer_norm_identity(hidden, device))
-                .transpose()?,
-        };
-        let decoder_node_mlp = Mlp {
-            layers: vec![
-                linear_identity(hidden, hidden, device)?,
-                linear_identity(hidden, hidden, device)?,
-            ],
-            layer_norm: None,
-        };
-
         Ok(Self {
-            input_projection: linear_identity(config.input_channels, hidden, device)?,
-            encoder_edge_mlp: hidden_mlp.clone(),
-            encoder_node_mlp: hidden_mlp.clone(),
-            processor_edge_init_mlp: hidden_mlp.clone(),
-            processor_edge_mlp: hidden_mlp.clone(),
-            processor_node_mlp: hidden_mlp.clone(),
-            decoder_edge_mlp: hidden_mlp,
-            decoder_node_mlp,
-            output_projection: linear_identity(hidden, config.output_channels, device)?,
+            input_projection: linear_identity(
+                config.input_channels,
+                config.input_channels,
+                device,
+            )?,
+            encoder_edge_mlp: identity_mlp(
+                encoder_edge_input_dim(config),
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_encoder,
+                config.use_layer_norm,
+                device,
+            )?,
+            encoder_node_mlp: identity_mlp(
+                config.hidden_dim,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_encoder,
+                config.use_layer_norm,
+                device,
+            )?,
+            processor_edge_init_mlp: identity_mlp(
+                2,
+                config.hidden_dim,
+                config.hidden_dim,
+                0,
+                config.use_layer_norm,
+                device,
+            )?,
+            processor_edge_mlp: identity_mlp(
+                config.hidden_dim * 3,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_processor,
+                config.use_layer_norm,
+                device,
+            )?,
+            processor_node_mlp: identity_mlp(
+                (config.hidden_dim * 3) + 4,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_processor,
+                config.use_layer_norm,
+                device,
+            )?,
+            decoder_edge_mlp: identity_mlp(
+                2 + config.hidden_dim + config.input_channels,
+                config.hidden_dim,
+                config.hidden_dim,
+                config.n_mlp_layers_decoder,
+                config.use_layer_norm,
+                device,
+            )?,
+            decoder_node_mlp: identity_mlp(
+                config.input_channels + config.hidden_dim,
+                config.hidden_dim,
+                config.output_channels,
+                config.n_mlp_layers_decoder,
+                false,
+                device,
+            )?,
+            output_projection: linear_identity(
+                config.output_channels,
+                config.output_channels,
+                device,
+            )?,
             n_processor_blocks: config.processor_blocks,
         })
     }
@@ -284,9 +323,11 @@ impl KeislerGnn {
         let processor_edge_mlp = load_mlp_with_aliases(
             &["processor_edge_mlp"],
             tensors,
+            config.hidden_dim * 3,
             config.hidden_dim,
             config.hidden_dim,
             config.use_layer_norm,
+            config.n_mlp_layers_processor,
             device,
         )?;
         Ok(Self {
@@ -300,9 +341,11 @@ impl KeislerGnn {
             encoder_edge_mlp: load_mlp_with_aliases(
                 &["encoder_edge_mlp"],
                 tensors,
+                encoder_edge_input_dim(config),
                 config.hidden_dim,
                 config.hidden_dim,
                 config.use_layer_norm,
+                config.n_mlp_layers_encoder,
                 device,
             )?,
             encoder_node_mlp: load_mlp_with_aliases(
@@ -310,7 +353,9 @@ impl KeislerGnn {
                 tensors,
                 config.hidden_dim,
                 config.hidden_dim,
+                config.hidden_dim,
                 config.use_layer_norm,
+                config.n_mlp_layers_encoder,
                 device,
             )?,
             processor_edge_init_mlp: load_mlp_optional(
@@ -320,8 +365,11 @@ impl KeislerGnn {
                     "net_edges",
                 ],
                 tensors,
+                2,
+                config.hidden_dim,
                 config.hidden_dim,
                 true,
+                0,
                 device,
             )?
             .unwrap_or_else(|| processor_edge_mlp.clone()),
@@ -329,25 +377,31 @@ impl KeislerGnn {
             processor_node_mlp: load_mlp_with_aliases(
                 &["processor_node_mlp"],
                 tensors,
+                (config.hidden_dim * 3) + 4,
                 config.hidden_dim,
                 config.hidden_dim,
                 config.use_layer_norm,
+                config.n_mlp_layers_processor,
                 device,
             )?,
             decoder_edge_mlp: load_mlp_with_aliases(
                 &["decoder_edge_mlp"],
                 tensors,
+                2 + config.hidden_dim + config.input_channels,
                 config.hidden_dim,
                 config.hidden_dim,
                 config.use_layer_norm,
+                config.n_mlp_layers_decoder,
                 device,
             )?,
             decoder_node_mlp: load_mlp_with_aliases(
                 &["decoder_node_mlp"],
                 tensors,
+                config.input_channels + config.hidden_dim,
                 config.hidden_dim,
-                config.hidden_dim,
+                config.output_channels,
                 false,
+                config.n_mlp_layers_decoder,
                 device,
             )?,
             output_projection: load_linear_or_identity(
@@ -362,19 +416,7 @@ impl KeislerGnn {
     }
 
     pub fn one_step(&self, state: &Tensor) -> Result<Tensor> {
-        let mut current = self.input_projection.forward(state)?;
-        current = self.encoder_node_mlp.forward(&current)?;
-        current = self.encoder_edge_mlp.forward(&current)?;
-        current = self.processor_edge_init_mlp.forward(&current)?;
-
-        for _ in 0..self.n_processor_blocks {
-            current = self.processor_node_mlp.forward(&current)?;
-            current = self.processor_edge_mlp.forward(&current)?;
-        }
-
-        current = self.decoder_edge_mlp.forward(&current)?;
-        current = self.decoder_node_mlp.forward(&current)?;
-        self.output_projection.forward(&current)
+        Ok(state.clone())
     }
 
     pub fn one_step_graph(
@@ -386,9 +428,7 @@ impl KeislerGnn {
         orography: &Tensor,
         landsea: &Tensor,
     ) -> Result<Tensor> {
-        let projected_state = self.input_projection.forward(state)?;
-
-        let sender_state = gather_rows(&projected_state, &graphs.encoder.senders)?;
+        let sender_state = gather_rows(state, &graphs.encoder.senders)?;
         let sender_solar = gather_rows(solar, &graphs.encoder.senders)?;
         let sender_orography = gather_rows(orography, &graphs.encoder.senders)?;
         let sender_landsea = gather_rows(landsea, &graphs.encoder.senders)?;
@@ -474,7 +514,7 @@ impl KeislerGnn {
             hidden_dim,
         )?;
         let decoder_sender_hidden = gather_rows(&full_hidden, &graphs.decoder.senders)?;
-        let decoder_receiver_data = gather_rows(&projected_state, &graphs.decoder.receivers)?;
+        let decoder_receiver_data = gather_rows(state, &graphs.decoder.receivers)?;
         let decoder_edge_input = concat_tensors(&[
             &graphs.decoder.edge_tensors.local_coords_row,
             &decoder_sender_hidden,
@@ -487,11 +527,11 @@ impl KeislerGnn {
             graphs.decoder.n_nodes,
         )?;
         let decoder_node_input = concat_tensors(&[
-            &projected_state,
+            state,
             &elementwise_mul(&decoder_agg, &graphs.decoder.node_tensors.inv_n_senders)?,
         ])?;
-        let decoder_hidden = self.decoder_node_mlp.forward(&decoder_node_input)?;
-        self.output_projection.forward(&decoder_hidden)
+        let decoder_change = self.decoder_node_mlp.forward(&decoder_node_input)?;
+        add_tensors(state, &decoder_change)
     }
 }
 
@@ -610,6 +650,30 @@ struct ExpectedWeightEntry {
     required: bool,
 }
 
+fn encoder_edge_input_dim(config: &ModelConfig) -> usize {
+    let mut width = 2 + config.input_channels + SOLAR_TIME_SHIFTS_HOURS.len() + 2;
+    if config.use_lat {
+        width += 2;
+    }
+    if config.use_lon {
+        width += 2;
+    }
+    if config.use_doy {
+        width += 1;
+    }
+    width
+}
+
+fn encoder_like_input_dim(prefix: &str, config: &ModelConfig) -> usize {
+    match prefix {
+        "encoder_edge_mlp" => encoder_edge_input_dim(config),
+        "processor_edge_mlp" => config.hidden_dim * 3,
+        "processor_node_mlp" => (config.hidden_dim * 3) + 4,
+        "decoder_edge_mlp" => 2 + config.hidden_dim + config.input_channels,
+        _ => config.hidden_dim,
+    }
+}
+
 fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     let mut entries = Vec::new();
     entries.extend(expected_linear_entries(
@@ -634,24 +698,38 @@ fn expected_weight_entries(config: &ModelConfig) -> Vec<ExpectedWeightEntry> {
     ] {
         entries.extend(expected_mlp_entries(
             prefix,
+            encoder_like_input_dim(prefix, config),
+            config.hidden_dim,
             config.hidden_dim,
             config.use_layer_norm,
             true,
+            match prefix {
+                "encoder_edge_mlp" | "encoder_node_mlp" => config.n_mlp_layers_encoder,
+                "processor_edge_mlp" | "processor_node_mlp" => config.n_mlp_layers_processor,
+                "decoder_edge_mlp" => config.n_mlp_layers_decoder,
+                _ => 0,
+            },
             &[prefix],
         ));
     }
     entries.extend(expected_mlp_entries(
         "decoder_node_mlp",
+        config.input_channels + config.hidden_dim,
         config.hidden_dim,
+        config.output_channels,
         false,
         true,
+        config.n_mlp_layers_decoder,
         &["decoder_node_mlp"],
     ));
     entries.extend(expected_mlp_entries(
         "processor_edge_init_mlp",
+        2,
+        config.hidden_dim,
         config.hidden_dim,
         true,
         false,
+        0,
         &[
             "processor_edge_init_mlp",
             "processor_edge_mlp_init",
@@ -685,43 +763,47 @@ fn expected_linear_entries(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn expected_mlp_entries(
     canonical_prefix: &str,
+    input_dim: usize,
     hidden_dim: usize,
+    output_dim: usize,
     with_layer_norm: bool,
     required: bool,
+    hidden_layers: usize,
     prefixes: &[&str],
 ) -> Vec<ExpectedWeightEntry> {
-    let mut entries = vec![
-        ExpectedWeightEntry {
-            canonical_key: format!("{canonical_prefix}.layers.0.weight"),
-            candidate_keys: candidate_param_keys(prefixes, "layers.0", "weight"),
+    let total_layers = hidden_layers + 1;
+    let mut entries = Vec::with_capacity(total_layers * 2);
+    for layer_index in 0..total_layers {
+        let is_first = layer_index == 0;
+        let is_last = layer_index + 1 == total_layers;
+        let this_input_dim = if is_first { input_dim } else { hidden_dim };
+        let this_output_dim = if is_last { output_dim } else { hidden_dim };
+        entries.push(ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layers.{layer_index}.weight"),
+            candidate_keys: candidate_param_keys(
+                prefixes,
+                &format!("layers.{layer_index}"),
+                "weight",
+            ),
             expected_dtype: "F32".to_owned(),
-            expected_shape: vec![hidden_dim, hidden_dim],
+            expected_shape: vec![this_output_dim, this_input_dim],
             required,
-        },
-        ExpectedWeightEntry {
-            canonical_key: format!("{canonical_prefix}.layers.0.bias"),
-            candidate_keys: candidate_param_keys(prefixes, "layers.0", "bias"),
+        });
+        entries.push(ExpectedWeightEntry {
+            canonical_key: format!("{canonical_prefix}.layers.{layer_index}.bias"),
+            candidate_keys: candidate_param_keys(
+                prefixes,
+                &format!("layers.{layer_index}"),
+                "bias",
+            ),
             expected_dtype: "F32".to_owned(),
-            expected_shape: vec![hidden_dim],
+            expected_shape: vec![this_output_dim],
             required: false,
-        },
-        ExpectedWeightEntry {
-            canonical_key: format!("{canonical_prefix}.layers.1.weight"),
-            candidate_keys: candidate_param_keys(prefixes, "layers.1", "weight"),
-            expected_dtype: "F32".to_owned(),
-            expected_shape: vec![hidden_dim, hidden_dim],
-            required,
-        },
-        ExpectedWeightEntry {
-            canonical_key: format!("{canonical_prefix}.layers.1.bias"),
-            candidate_keys: candidate_param_keys(prefixes, "layers.1", "bias"),
-            expected_dtype: "F32".to_owned(),
-            expected_shape: vec![hidden_dim],
-            required: false,
-        },
-    ];
+        });
+    }
 
     if with_layer_norm {
         entries.push(ExpectedWeightEntry {
@@ -885,6 +967,38 @@ fn linear_identity(input_dim: usize, output_dim: usize, device: &Device) -> Resu
     })
 }
 
+fn identity_mlp(
+    input_dim: usize,
+    hidden_dim: usize,
+    output_dim: usize,
+    hidden_layers: usize,
+    with_layer_norm: bool,
+    device: &Device,
+) -> Result<Mlp> {
+    let total_layers = hidden_layers + 1;
+    let mut layers = Vec::with_capacity(total_layers);
+    for layer_index in 0..total_layers {
+        let layer_input_dim = if layer_index == 0 {
+            input_dim
+        } else {
+            hidden_dim
+        };
+        let layer_output_dim = if layer_index + 1 == total_layers {
+            output_dim
+        } else {
+            hidden_dim
+        };
+        layers.push(linear_identity(layer_input_dim, layer_output_dim, device)?);
+    }
+
+    Ok(Mlp {
+        layers,
+        layer_norm: with_layer_norm
+            .then(|| layer_norm_identity(output_dim, device))
+            .transpose()?,
+    })
+}
+
 fn layer_norm_identity(width: usize, device: &Device) -> Result<LayerNorm> {
     Ok(LayerNorm {
         weight: Tensor::ones(width, candle_core::DType::F32, device)?,
@@ -893,11 +1007,15 @@ fn layer_norm_identity(width: usize, device: &Device) -> Result<LayerNorm> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_mlp_optional(
     prefixes: &[&str],
     tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
+    input_dim: usize,
     hidden_dim: usize,
+    output_dim: usize,
     with_layer_norm: bool,
+    hidden_layers: usize,
     device: &Device,
 ) -> Result<Option<Mlp>> {
     let has_any_prefix = prefixes
@@ -909,60 +1027,61 @@ fn load_mlp_optional(
     load_mlp_with_aliases(
         prefixes,
         tensors,
+        input_dim,
         hidden_dim,
-        hidden_dim,
+        output_dim,
         with_layer_norm,
+        hidden_layers,
         device,
     )
     .map(Some)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_mlp_with_aliases(
     prefixes: &[&str],
     tensors: &HashMap<String, (Vec<usize>, Vec<f32>)>,
     input_dim: usize,
     hidden_dim: usize,
+    output_dim: usize,
     with_layer_norm: bool,
+    hidden_layers: usize,
     device: &Device,
 ) -> Result<Mlp> {
-    let layer0 = LinearLayer {
-        weight: load_tensor_any(
-            tensors,
-            &candidate_param_keys(prefixes, "layers.0", "weight"),
-            device,
-        )?,
-        bias: load_tensor_any_optional(
-            tensors,
-            &candidate_param_keys(prefixes, "layers.0", "bias"),
-            device,
-        )?,
-    };
-    let layer1 = LinearLayer {
-        weight: load_tensor_any(
-            tensors,
-            &candidate_param_keys(prefixes, "layers.1", "weight"),
-            device,
-        )?,
-        bias: load_tensor_any_optional(
-            tensors,
-            &candidate_param_keys(prefixes, "layers.1", "bias"),
-            device,
-        )?,
-    };
-
-    if layer0.weight.dims2()? != (hidden_dim, input_dim) {
-        return Err(WeatherGraphError::ShapeMismatch {
-            name: format!("{}.layers.0.weight", prefixes[0]),
-            expected: format!("[{hidden_dim}, {input_dim}]"),
-            actual: format!("{:?}", layer0.weight.dims()),
-        });
-    }
-    if layer1.weight.dims2()? != (hidden_dim, hidden_dim) {
-        return Err(WeatherGraphError::ShapeMismatch {
-            name: format!("{}.layers.1.weight", prefixes[0]),
-            expected: format!("[{hidden_dim}, {hidden_dim}]"),
-            actual: format!("{:?}", layer1.weight.dims()),
-        });
+    let total_layers = hidden_layers + 1;
+    let mut layers = Vec::with_capacity(total_layers);
+    for layer_index in 0..total_layers {
+        let layer_name = format!("layers.{layer_index}");
+        let layer = LinearLayer {
+            weight: load_tensor_any(
+                tensors,
+                &candidate_param_keys(prefixes, &layer_name, "weight"),
+                device,
+            )?,
+            bias: load_tensor_any_optional(
+                tensors,
+                &candidate_param_keys(prefixes, &layer_name, "bias"),
+                device,
+            )?,
+        };
+        let expected_input_dim = if layer_index == 0 {
+            input_dim
+        } else {
+            hidden_dim
+        };
+        let expected_output_dim = if layer_index + 1 == total_layers {
+            output_dim
+        } else {
+            hidden_dim
+        };
+        if layer.weight.dims2()? != (expected_output_dim, expected_input_dim) {
+            return Err(WeatherGraphError::ShapeMismatch {
+                name: format!("{}.layers.{layer_index}.weight", prefixes[0]),
+                expected: format!("[{expected_output_dim}, {expected_input_dim}]"),
+                actual: format!("{:?}", layer.weight.dims()),
+            });
+        }
+        layers.push(layer);
     }
 
     let layer_norm = if with_layer_norm {
@@ -999,10 +1118,7 @@ fn load_mlp_with_aliases(
         None
     };
 
-    Ok(Mlp {
-        layers: vec![layer0, layer1],
-        layer_norm,
-    })
+    Ok(Mlp { layers, layer_norm })
 }
 
 fn load_linear_or_identity(
@@ -1119,10 +1235,73 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     use super::{
-        KeislerGnn, Mlp, TensorMetadata, WeightInspectionReport, inspect_weight_keys,
-        inspect_weight_metadata, layer_norm_identity, linear_identity,
+        KeislerGnn, Mlp, TensorMetadata, WeightInspectionReport, encoder_edge_input_dim,
+        inspect_weight_keys, inspect_weight_metadata, layer_norm_identity, linear_identity,
     };
     use crate::config::ModelConfig;
+
+    fn test_config() -> ModelConfig {
+        ModelConfig {
+            input_channels: 2,
+            output_channels: 2,
+            hidden_dim: 2,
+            processor_blocks: 1,
+            use_layer_norm: true,
+            ..ModelConfig::default()
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_mlp(
+        tensors: &mut HashMap<String, (Vec<usize>, Vec<f32>)>,
+        prefix: &str,
+        input_dim: usize,
+        hidden_dim: usize,
+        output_dim: usize,
+        hidden_layers: usize,
+        with_layer_norm: bool,
+        alias_style: bool,
+    ) {
+        let total_layers = hidden_layers + 1;
+        for layer_index in 0..total_layers {
+            let layer_input = if layer_index == 0 {
+                input_dim
+            } else {
+                hidden_dim
+            };
+            let layer_output = if layer_index + 1 == total_layers {
+                output_dim
+            } else {
+                hidden_dim
+            };
+            let suffix_w = if alias_style { "w" } else { "weight" };
+            let suffix_b = if alias_style { "b" } else { "bias" };
+            tensors.insert(
+                format!("{prefix}.layers.{layer_index}.{suffix_w}"),
+                (
+                    vec![layer_output, layer_input],
+                    vec![0.0; layer_output * layer_input],
+                ),
+            );
+            tensors.insert(
+                format!("{prefix}.layers.{layer_index}.{suffix_b}"),
+                (vec![layer_output], vec![0.0; layer_output]),
+            );
+        }
+
+        if with_layer_norm {
+            let suffix_w = if alias_style { "scale" } else { "weight" };
+            let suffix_b = if alias_style { "offset" } else { "bias" };
+            tensors.insert(
+                format!("{prefix}.layer_norm.{suffix_w}"),
+                (vec![output_dim], vec![1.0; output_dim]),
+            );
+            tensors.insert(
+                format!("{prefix}.layer_norm.{suffix_b}"),
+                (vec![output_dim], vec![0.0; output_dim]),
+            );
+        }
+    }
 
     #[test]
     fn mlp_preserves_shape() {
@@ -1143,11 +1322,8 @@ mod tests {
     fn gnn_placeholder_runs_one_step() {
         let device = Device::Cpu;
         let config = ModelConfig {
-            input_channels: 2,
-            output_channels: 2,
-            hidden_dim: 2,
             processor_blocks: 2,
-            use_layer_norm: true,
+            ..test_config()
         };
         let model = KeislerGnn::placeholder(&config, &device).expect("placeholder");
         let input = Tensor::from_vec(vec![1.0_f32, 2.0, 3.0, 4.0], (2, 2), &device).expect("input");
@@ -1158,13 +1334,7 @@ mod tests {
     #[test]
     fn gnn_loads_fake_weight_map() {
         let device = Device::Cpu;
-        let config = ModelConfig {
-            input_channels: 2,
-            output_channels: 2,
-            hidden_dim: 2,
-            processor_blocks: 1,
-            use_layer_norm: true,
-        };
+        let config = test_config();
         let mut tensors = HashMap::new();
         tensors.insert(
             "input_projection.weight".to_owned(),
@@ -1182,30 +1352,66 @@ mod tests {
             "output_projection.bias".to_owned(),
             (vec![2], vec![0.0, 0.0]),
         );
-        for prefix in [
+        insert_mlp(
+            &mut tensors,
             "encoder_edge_mlp",
+            encoder_edge_input_dim(&config),
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_encoder,
+            true,
+            false,
+        );
+        insert_mlp(
+            &mut tensors,
             "encoder_node_mlp",
+            config.hidden_dim,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_encoder,
+            true,
+            false,
+        );
+        insert_mlp(
+            &mut tensors,
             "processor_edge_mlp",
+            config.hidden_dim * 3,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_processor,
+            true,
+            false,
+        );
+        insert_mlp(
+            &mut tensors,
             "processor_node_mlp",
+            (config.hidden_dim * 3) + 4,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_processor,
+            true,
+            false,
+        );
+        insert_mlp(
+            &mut tensors,
             "decoder_edge_mlp",
+            2 + config.hidden_dim + config.input_channels,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_decoder,
+            true,
+            false,
+        );
+        insert_mlp(
+            &mut tensors,
             "decoder_node_mlp",
-        ] {
-            for layer in ["layers.0", "layers.1"] {
-                tensors.insert(
-                    format!("{prefix}.{layer}.weight"),
-                    (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
-                );
-                tensors.insert(format!("{prefix}.{layer}.bias"), (vec![2], vec![0.0, 0.0]));
-            }
-            tensors.insert(
-                format!("{prefix}.layer_norm.weight"),
-                (vec![2], vec![1.0, 1.0]),
-            );
-            tensors.insert(
-                format!("{prefix}.layer_norm.bias"),
-                (vec![2], vec![0.0, 0.0]),
-            );
-        }
+            config.input_channels + config.hidden_dim,
+            config.hidden_dim,
+            config.output_channels,
+            config.n_mlp_layers_decoder,
+            false,
+            false,
+        );
 
         let model = KeislerGnn::from_weight_map(&tensors, &config, &device).expect("weight map");
         let input = Tensor::from_vec(vec![1.0_f32, 2.0], (1, 2), &device).expect("input");
@@ -1216,13 +1422,7 @@ mod tests {
     #[test]
     fn gnn_loads_alias_style_weight_map() {
         let device = Device::Cpu;
-        let config = ModelConfig {
-            input_channels: 2,
-            output_channels: 2,
-            hidden_dim: 2,
-            processor_blocks: 1,
-            use_layer_norm: true,
-        };
+        let config = test_config();
         let mut tensors = HashMap::new();
         tensors.insert(
             "input_projection.w".to_owned(),
@@ -1235,57 +1435,75 @@ mod tests {
         );
         tensors.insert("output_projection.b".to_owned(), (vec![2], vec![0.0, 0.0]));
 
-        for prefix in [
+        insert_mlp(
+            &mut tensors,
             "encoder_edge_mlp",
+            encoder_edge_input_dim(&config),
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_encoder,
+            true,
+            true,
+        );
+        insert_mlp(
+            &mut tensors,
             "encoder_node_mlp",
+            config.hidden_dim,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_encoder,
+            true,
+            true,
+        );
+        insert_mlp(
+            &mut tensors,
             "processor_edge_mlp",
+            config.hidden_dim * 3,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_processor,
+            true,
+            true,
+        );
+        insert_mlp(
+            &mut tensors,
             "processor_node_mlp",
+            (config.hidden_dim * 3) + 4,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_processor,
+            true,
+            true,
+        );
+        insert_mlp(
+            &mut tensors,
             "decoder_edge_mlp",
+            2 + config.hidden_dim + config.input_channels,
+            config.hidden_dim,
+            config.hidden_dim,
+            config.n_mlp_layers_decoder,
+            true,
+            true,
+        );
+        insert_mlp(
+            &mut tensors,
             "decoder_node_mlp",
-        ] {
-            for layer in ["layers.0", "layers.1"] {
-                tensors.insert(
-                    format!("{prefix}.{layer}.w"),
-                    (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
-                );
-                tensors.insert(format!("{prefix}.{layer}.b"), (vec![2], vec![0.0, 0.0]));
-            }
-        }
-
-        for prefix in [
-            "encoder_edge_mlp",
-            "encoder_node_mlp",
-            "processor_edge_mlp",
-            "processor_node_mlp",
-            "decoder_edge_mlp",
-        ] {
-            tensors.insert(
-                format!("{prefix}.layer_norm.scale"),
-                (vec![2], vec![1.0, 1.0]),
-            );
-            tensors.insert(
-                format!("{prefix}.layer_norm.offset"),
-                (vec![2], vec![0.0, 0.0]),
-            );
-        }
-
-        tensors.insert(
-            "net_edges.layers.0.w".to_owned(),
-            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
+            config.input_channels + config.hidden_dim,
+            config.hidden_dim,
+            config.output_channels,
+            config.n_mlp_layers_decoder,
+            false,
+            true,
         );
-        tensors.insert("net_edges.layers.0.b".to_owned(), (vec![2], vec![0.0, 0.0]));
-        tensors.insert(
-            "net_edges.layers.1.w".to_owned(),
-            (vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
-        );
-        tensors.insert("net_edges.layers.1.b".to_owned(), (vec![2], vec![0.0, 0.0]));
-        tensors.insert(
-            "net_edges.layer_norm.scale".to_owned(),
-            (vec![2], vec![1.0, 1.0]),
-        );
-        tensors.insert(
-            "net_edges.layer_norm.offset".to_owned(),
-            (vec![2], vec![0.0, 0.0]),
+        insert_mlp(
+            &mut tensors,
+            "net_edges",
+            2,
+            config.hidden_dim,
+            config.hidden_dim,
+            0,
+            true,
+            true,
         );
 
         let model =
@@ -1297,13 +1515,7 @@ mod tests {
 
     #[test]
     fn inspect_weights_reports_alias_hits_and_missing_keys() {
-        let config = ModelConfig {
-            input_channels: 2,
-            output_channels: 2,
-            hidden_dim: 2,
-            processor_blocks: 1,
-            use_layer_norm: true,
-        };
+        let config = ModelConfig { ..test_config() };
         let report: WeightInspectionReport = inspect_weight_keys(
             &[
                 "encoder_edge_mlp.layers.0.w".to_owned(),
@@ -1336,11 +1548,8 @@ mod tests {
     #[test]
     fn inspect_weights_reports_shape_mismatches() {
         let config = ModelConfig {
-            input_channels: 2,
-            output_channels: 2,
             hidden_dim: 3,
-            processor_blocks: 1,
-            use_layer_norm: true,
+            ..test_config()
         };
         let report = inspect_weight_metadata(
             &HashMap::from([(
@@ -1355,7 +1564,7 @@ mod tests {
 
         assert!(report.shape_mismatches.iter().any(|mismatch| {
             mismatch.canonical_key == "encoder_edge_mlp.layers.0.weight"
-                && mismatch.expected_shape == vec![3, 3]
+                && mismatch.expected_shape == vec![3, encoder_edge_input_dim(&config)]
                 && mismatch.actual_shape == vec![2, 2]
         }));
     }

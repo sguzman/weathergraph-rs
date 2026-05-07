@@ -1,41 +1,42 @@
 # weathergraph-rs
 
-Rust-native inference scaffolding for the Keisler 2022 graph neural weather forecasting model.
+Rust-native inference port of the Keisler 2022 graph neural weather forecasting model.
 
-This project ports the inference path of [`rkeisler/keisler-2022`](https://github.com/rkeisler/keisler-2022) from Python, JAX, Haiku, and Jraph into Rust using Candle-oriented tensor/model abstractions. The current scope is inference parity infrastructure, not Rust training.
+`weathergraph-rs` ports the Python/JAX/Haiku inference path from [`rkeisler/keisler-2022`](https://github.com/rkeisler/keisler-2022) into a Rust workspace built around typed artifact loading, explicit model modules, `tracing`-based logging, strict checkpoint validation, one-step parity fixtures, autoregressive rollout, and NetCDF forecast output.
 
 ## Status
 
-`weathergraph-rs` currently implements the V1 inference-core foundation:
-
 | Milestone | Status | Notes |
 | --- | --- | --- |
-| Artifact inspector | Implemented | Loads `.npz.gz` artifacts and prints typed shape summaries. |
-| Geometry parity | Implemented | ERA5 and H3 geometry generation with exact node-count checks. |
-| Graph aggregation kernel | Implemented | CPU-first gather and scatter-add aggregation with tests. |
-| MLP and LayerNorm parity | Implemented | Explicit Rust/Candle tensor modules with fake-weight tests. |
-| One-step scaffold | Implemented | Runner, model loading boundary, solar features, and one-step path. |
-| CLI and logging | Implemented | `inspect-artifacts`, `inspect-geometry`, `inspect-weights`, and `forecast` command wiring. |
-| Python/Rust numeric parity | Scaffolded | Fixture contract and weight-export boundary are documented. |
-| Autoregressive rollout / NetCDF output | Deferred | Reserved for the next milestone. |
+| Artifact inspector | Implemented | Loads `.npz.gz` graph, feature, normalizer, and surface artifacts. |
+| Geometry parity | Implemented | Reconstructs ERA5/H3 geometry with exact `65160 / 5882 / 71042` node counts. |
+| Graph aggregation kernel | Implemented | CPU-first gather/scatter tensor helpers with deterministic tests. |
+| MLP and LayerNorm parity | Implemented | Explicit Rust/Candle modules with strict weight inspection. |
+| One-step runner/model path | Implemented | Graph-aware one-step execution with solar, day-of-year, and surface features. |
+| CLI and logging | Implemented | `inspect-artifacts`, `inspect-geometry`, `inspect-weights`, and `forecast`. |
+| Python/Rust parity workflow | Implemented | Weight export, mapping-template, strict inspection, and one-step fixture harness. |
+| Autoregressive rollout / NetCDF output | Implemented | `forecast` performs local ERA5-style initialization, rollout, and `.nc` writing. |
+
+Numeric parity against the original Python model still depends on running the export tooling against real upstream artifacts and checking in or regenerating a real fixture. The repo now contains the full workflow and acceptance harness for that step.
 
 ## Scope
 
-The project is intentionally staged:
+In scope:
 
-- In scope now:
-  - artifact loading
-  - geometry reconstruction
-  - static graph loading
-  - tensor aggregation primitives
-  - explicit model module shapes
-  - one-step runner scaffolding
-  - CLI and documentation
-- Deferred:
-  - full parity against the original trained weights
-  - multi-step rollout
-  - NetCDF forecast output
-  - Rust-native training
+- inference-only Rust port
+- local artifact loading
+- exported `safetensors` checkpoints
+- one-step parity harness
+- autoregressive rollout
+- NetCDF forecast output
+
+Out of scope:
+
+- Rust-native training
+- direct loading of Python pickle checkpoints from Rust
+- network-dependent realtime ingestion in the default path
+
+`opendata` remains intentionally unsupported in the runner until there is a robust local contract for it. V1 uses prepared local ERA5-style NetCDF initialization files.
 
 ## Workspace Layout
 
@@ -49,37 +50,38 @@ weathergraph-rs/
 ├── tests/
 │   └── fixtures/
 └── tools/
-    └── export_weights.py
+    ├── export_parity_fixture.py
+    ├── export_weights.py
+    └── weight_mapping.example.json
 ```
 
-Core crate modules:
+Core modules:
 
-- `config.rs`: config structs and forecast request validation
-- `error.rs`: shared error model
-- `features.rs`: typed `.npz.gz` artifact loading and summaries
-- `geometry.rs`: ERA5 and H3 geometry generation
-- `graph.rs`: static graph loading
+- `config.rs`: config structs, runtime defaults, artifact filenames, model settings
+- `error.rs`: shared error types
+- `features.rs`: typed `.npz.gz` loading and summaries
+- `geometry.rs`: ERA5/H3 geometry reconstruction
+- `graph.rs`: graph artifacts, sender/receiver indices, static node/edge tensors
 - `normalizer.rs`: temporal normalizer and surface feature loading
 - `solar.rs`: deterministic solar and seasonal features
-- `tensor.rs`: gather and scatter-add helpers
-- `model.rs`: explicit MLP, LayerNorm, and GNN scaffolding
-- `runner.rs`: high-level runner orchestration
+- `tensor.rs`: gather/scatter tensor helpers
+- `model.rs`: explicit MLP, LayerNorm, checkpoint inspection, and graph-aware GNN path
+- `runner.rs`: ERA5 initialization loading, one-step execution, rollout, and NetCDF writing
 
 ## Upstream Relationship
 
-The reference implementation lives in [`rkeisler/keisler-2022`](https://github.com/rkeisler/keisler-2022). `weathergraph-rs` preserves the same high-level model structure:
+The reference model lives in [`rkeisler/keisler-2022`](https://github.com/rkeisler/keisler-2022). The Rust port preserves the same high-level structure:
 
-1. Encoder from ERA5 latitude/longitude fields to an H3 mesh
-2. Processor graph message passing blocks
-3. Decoder back to lat/lon outputs
-4. Autoregressive rollout for longer forecasts
+1. Encode ERA5 lat/lon nodes onto the H3 mesh.
+2. Run processor message-passing updates on H3 nodes.
+3. Decode change predictions back onto the lat/lon grid.
+4. Apply autoregressive rollout in 6-hour steps.
 
-The Rust port does not read the original Python pickle weights directly. The boundary is an export tool that flattens the upstream Haiku parameter tree into `safetensors`.
-That exporter now supports raw-key inspection, unresolved-key reporting, dry-run coverage checks, mapping-template generation, and explicit key remapping so the upstream Haiku module names can be reconciled with the Rust loader contract incrementally.
+The Rust side does not read the upstream pickle directly. The stable interchange boundary is an exported `safetensors` checkpoint plus optional parity fixtures.
 
 ## Artifact Expectations
 
-The Rust repo does not vendor the large upstream artifacts. Instead, place the upstream `.npz.gz` graph and normalizer files in a data directory and point the CLI at it.
+The repo does not vendor large upstream data. Put the upstream artifacts in a local data directory and point the CLI at it.
 
 Expected files:
 
@@ -90,16 +92,26 @@ Expected files:
 - `edge_features_*.npz.gz`
 - `temporal_normalizer*.npz.gz`
 - `orography_landsea.npz.gz`
+- `era5_input.nc`
 - exported `weights.safetensors`
 
-See [artifacts/README.md](artifacts/README.md) for the exact export contract.
+`era5_input.nc` is expected to contain these variables on dimensions `(time=1, level=13, latitude=181, longitude=360)`:
+
+- `specific_humidity`
+- `temperature`
+- `u_component_of_wind`
+- `v_component_of_wind`
+- `vertical_velocity`
+- `geopotential`
+
+See [artifacts/README.md](artifacts/README.md) for the finalized export contract.
 
 ## CLI
 
 Inspect artifact shapes:
 
 ```bash
-cargo run -p weathergraph-cli -- inspect-artifacts --data-dir /path/to/upstream/data
+cargo run -p weathergraph-cli -- inspect-artifacts --data-dir /path/to/data
 ```
 
 Inspect geometry parity:
@@ -108,7 +120,7 @@ Inspect geometry parity:
 cargo run -p weathergraph-cli -- inspect-geometry
 ```
 
-Inspect an exported checkpoint before trying parity or forecast:
+Inspect an exported checkpoint:
 
 ```bash
 cargo run -p weathergraph-cli -- inspect-weights \
@@ -120,23 +132,82 @@ cargo run -p weathergraph-cli -- inspect-weights \
   --hidden-dim 256
 ```
 
-Validate a forecast request and runner wiring:
+Run a forecast from a prepared local ERA5-style NetCDF file:
 
 ```bash
 cargo run -p weathergraph-cli -- forecast \
-  --data-dir /path/to/upstream/data \
+  --data-dir /path/to/data \
   --weights /path/to/weights.safetensors \
   --init 2020-01-01T00:00:00Z \
-  --steps 1 \
+  --steps 4 \
   --input era5 \
   --out ./forecast.nc
 ```
 
-At this stage the `forecast` command validates the configuration, loads artifacts, exercises the one-step scaffold, and then returns a clear deferred-work error for rollout/output.
+The `forecast` command now performs real rollout and writes NetCDF output. Model-shape override flags also exist on `forecast` for small synthetic fixtures and debugging, but the real upstream path should use the default `78 / 78 / 256` configuration unless the exported checkpoint says otherwise.
+
+## End-to-End Workflow
+
+1. Dry-run checkpoint export and inspect raw keys:
+
+```bash
+python3 tools/export_weights.py \
+  --source /path/to/upstream.pkl \
+  --out /tmp/weights.safetensors \
+  --dump-keys \
+  --emit-unmapped /tmp/unmapped.json \
+  --emit-mapping-template /tmp/mapping-template.json \
+  --dry-run
+```
+
+2. Fill in any unresolved mappings, then export the final checkpoint:
+
+```bash
+python3 tools/export_weights.py \
+  --source /path/to/upstream.pkl \
+  --out /path/to/data/weights.safetensors \
+  --mapping-file /path/to/mapping.json
+```
+
+3. Validate the exported checkpoint strictly:
+
+```bash
+cargo run -p weathergraph-cli -- inspect-weights \
+  --weights /path/to/data/weights.safetensors \
+  --json \
+  --strict
+```
+
+4. Export a one-step parity fixture from the upstream Python environment:
+
+```bash
+python3 tools/export_parity_fixture.py \
+  --data-dir /path/to/data \
+  --weights /path/to/data/weights.safetensors \
+  --out-dir tests/fixtures/parity/one_step
+```
+
+5. Run the Rust test suite. If `tests/fixtures/parity/one_step/manifest.json` and `tensors.safetensors` are present, the parity test runs automatically:
+
+```bash
+cargo test --workspace
+```
+
+6. Run the forecast CLI to produce NetCDF output:
+
+```bash
+cargo run -p weathergraph-cli -- forecast \
+  --data-dir /path/to/data \
+  --weights /path/to/data/weights.safetensors \
+  --init 2020-01-01T00:00:00Z \
+  --steps 4 \
+  --input era5 \
+  --out ./forecast.nc
+```
 
 ## Logging
 
-All user-visible logging goes through `tracing`. By default the CLI logs at `info`. Override with `RUST_LOG`, for example:
+All user-visible logging goes through `tracing`. The default CLI level is `info`. Override with `RUST_LOG`, for example:
 
 ```bash
 RUST_LOG=debug cargo run -p weathergraph-cli -- inspect-artifacts --data-dir /path/to/data
@@ -144,40 +215,30 @@ RUST_LOG=debug cargo run -p weathergraph-cli -- inspect-artifacts --data-dir /pa
 
 ## Development
 
-Format, lint, and test the full workspace:
+Format, lint, and test:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-```
-
-Exercise the Python exporter helpers:
-
-```bash
-python3 -m py_compile tools/export_weights.py tools/export_parity_fixture.py
 python3 -m unittest discover -s tools/tests
 ```
 
 ## Testing
 
-The codebase includes:
+The repo includes:
 
 - unit tests for `.npz.gz` loading
-- unit tests for ERA5/H3 geometry counts
-- unit tests for gather/scatter tensor kernels
-- unit tests for MLP and GNN shape behavior
-- unit tests for weight-key inspection and alias matching
-- CLI integration tests for `inspect-artifacts`, `inspect-geometry`, `inspect-weights`, and forecast validation
+- unit tests for geometry counts
+- unit tests for gather/scatter tensor helpers
+- unit tests for model loading and checkpoint inspection
+- CLI integration tests for artifact inspection, geometry inspection, weight inspection, and NetCDF forecast output
+- a gated one-step parity fixture test
 
-Parity against real upstream tensors is intentionally gated behind external fixtures and exported weights.
+The parity test in `crates/weathergraph-core/tests/parity_fixture.rs` executes automatically when the real exported fixture is present at `tests/fixtures/parity/one_step/`.
 
-To run a real one-step parity check, export a fixture into `tests/fixtures/parity/one_step/` using `tools/export_parity_fixture.py`. When `manifest.json` and `tensors.safetensors` are present there, `cargo test --workspace` will automatically execute the parity comparison in addition to the synthetic unit/integration tests.
+## Current Limitations
 
-## Deferred Work
-
-- Match the original Haiku parameter layout exactly and validate one-step numerical parity
-- Add full graph-based feature assembly and real model state semantics
-- Implement autoregressive rollout
-- Write NetCDF forecast output
-- Add recent ECMWF Open Data ingestion for real-time initialization
+- Exact numeric parity is not claimed until a real upstream checkpoint and one-step fixture are exported and validated through the committed harness.
+- `opendata` is still rejected with a clear runtime error.
+- The Rust checkpoint contract is strict by design; missing required tensors, dtype mismatches, or shape mismatches fail inspection and loading.
